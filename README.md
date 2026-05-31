@@ -102,9 +102,11 @@ Installing → Staged(v) | Errored(msg)`.
 
 ## Platform notes
 
-- **macOS** replacing an app in `/Applications` needs write permission to it;
-  privilege escalation (Zed's `osascript` admin fallback) is not yet
-  implemented.
+- **macOS** replacing an app in `/Applications` needs write permission to it.
+  An admin who drag-installed the app can replace it without a prompt; a
+  standard user cannot. A privilege-escalation fallback (an `osascript … with
+  administrator privileges` prompt, as Velopack does) is not yet implemented —
+  a permission error just surfaces as a failed update.
 - The `gpui` feature pulls `gpui` from the zed git repo (no registry release),
   so it needs the same native toolchain GPUI itself requires (a real Xcode +
   Metal on macOS). The core (default features) builds with stable Rust alone.
