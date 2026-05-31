@@ -67,6 +67,9 @@ pub use engine::{EngineConfig, UpdateEngine};
 pub use error::{Error, Result};
 pub use install::{Installed, current_install_root};
 pub use release::{Asset, Release, parse_tag};
+/// Re-exported so consumers can build an [`EngineConfig`] without depending on
+/// `semver` directly (e.g. `Version::parse(env!("CARGO_PKG_VERSION"))`).
+pub use semver::Version;
 pub use source::{GitHubSource, UpdateSource};
 
 #[cfg(feature = "gpui")]
