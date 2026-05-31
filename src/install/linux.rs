@@ -86,9 +86,7 @@ fn find_binary(dir: &Path, wanted: &str) -> Result<PathBuf> {
             if path.file_name().and_then(OsStr::to_str) == Some(wanted) {
                 return Ok(path);
             }
-            let is_exec = fs::metadata(&path)
-                .map(|m| m.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false);
+            let is_exec = fs::metadata(&path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
             if is_exec && fallback.is_none() {
                 fallback = Some(path);
             }

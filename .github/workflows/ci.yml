@@ -21,9 +21,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Clippy on every OS so each platform's install strategy
+  # (install/{linux,macos,windows}.rs) is lint-gated — a `cfg`-gated module is
+  # invisible to clippy run on a different host.
   clippy:
-    name: clippy (core)
-    runs-on: ubuntu-latest
+    name: clippy core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

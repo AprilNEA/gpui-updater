@@ -28,6 +28,25 @@ platform artifact, verify it, and swap it into place.
   an update is staged. No background polling: trigger checks explicitly, which
   suits a privacy-conscious "Check for updates" button.
 
+## Installation
+
+Not published on crates.io: the `gpui` feature depends on `gpui` from the zed
+git repo, and a crate with a git dependency can't be published to the registry.
+Install from git instead:
+
+```toml
+[dependencies]
+# Core only (blocking engine, no GPUI):
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.1" }
+
+# With the GPUI integration (Entity<Updater>):
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.1", features = ["gpui"] }
+```
+
+When your app already depends on `gpui` from the same zed git source, Cargo
+unifies the two onto your pinned commit — `gpui-updater` does not impose a gpui
+version.
+
 ## Usage
 
 ### Blocking engine (any app, CLI included)
@@ -56,12 +75,7 @@ if let Some(release) = engine.check()? {
 
 ### GPUI entity
 
-Enable the feature:
-
-```toml
-[dependencies]
-gpui-updater = { version = "0.0.1", features = ["gpui"] }
-```
+Enable the `gpui` feature (see [Installation](#installation)):
 
 ```rust
 use gpui_updater::{EngineConfig, GitHubSource, UpdateStatus, Updater};
