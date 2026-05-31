@@ -115,7 +115,12 @@ Downloading { downloaded, total } → Installing → Staged(v) | Errored(msg)`.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
 
 [GPUI]: https://www.gpui.rs/
 [minisign]: https://jedisct1.github.io/minisign/
