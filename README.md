@@ -37,10 +37,10 @@ Install from git instead:
 ```toml
 [dependencies]
 # Core only (blocking engine, no GPUI):
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.1" }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.2" }
 
 # With the GPUI integration (Entity<Updater>):
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.1", features = ["gpui"] }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.2", features = ["gpui"] }
 ```
 
 When your app already depends on `gpui` from the same zed git source, Cargo
@@ -97,8 +97,10 @@ updater.update(cx, |u, cx| u.check(cx));
 // when status is Staged → u.restart(cx)
 ```
 
-`UpdateStatus`: `Idle → Checking → {UpToDate | Available(v)} → Downloading →
-Installing → Staged(v) | Errored(msg)`.
+`UpdateStatus`: `Idle → Checking → {UpToDate | Available(v)} →
+Downloading { downloaded, total } → Installing → Staged(v) | Errored(msg)`.
+`Downloading` carries live byte counts (`total` is `None` when the server omits
+`Content-Length`).
 
 ## Platform notes
 

@@ -26,6 +26,8 @@
 //! ```
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use gpui::{Context, Task};
 use semver::Version;
@@ -49,8 +51,9 @@ pub enum UpdateStatus {
     UpToDate,
     /// A newer version is available; call [`Updater::download_and_install`].
     Available(Version),
-    /// The update artifact is downloading. Progress is currently indeterminate.
-    Downloading,
+    /// The update artifact is downloading. `total` is `None` until/unless the
+    /// server reports a `Content-Length`.
+    Downloading { downloaded: u64, total: Option<u64> },
     /// The download is verified and being swapped into place.
     Installing,
     /// The update is installed; call [`Updater::restart`] to launch it.
@@ -63,7 +66,10 @@ impl UpdateStatus {
     /// Whether an operation is currently in flight.
     #[must_use]
     pub fn is_busy(&self) -> bool {
-        matches!(self, Self::Checking | Self::Downloading | Self::Installing)
+        matches!(
+            self,
+            Self::Checking | Self::Downloading { .. } | Self::Installing
+        )
     }
 }
 
@@ -151,17 +157,56 @@ impl Updater {
             return;
         };
         let engine = self.engine.clone();
-        self.set_status(UpdateStatus::Downloading, cx);
+        self.set_status(
+            UpdateStatus::Downloading {
+                downloaded: 0,
+                total: None,
+            },
+            cx,
+        );
         self.task = Some(cx.spawn(async move |this, cx| {
-            // Download on a background thread (blocking network + hashing).
-            let downloaded = {
-                let engine = engine.clone();
-                let release = release.clone();
-                cx.background_executor()
-                    .spawn(async move { engine.download(&release, |_, _| {}) })
-                    .await
+            // The blocking download runs on a background thread and reports
+            // progress into shared atomics; this foreground task polls them so
+            // the UI updates live without being spammed by every 64 KiB chunk.
+            let downloaded = Arc::new(AtomicU64::new(0));
+            let total = Arc::new(AtomicU64::new(0)); // 0 = unknown
+            let done = Arc::new(AtomicBool::new(false));
+
+            let dl_task = {
+                let (engine, release) = (engine.clone(), release.clone());
+                let (d, t, fin) = (downloaded.clone(), total.clone(), done.clone());
+                cx.background_executor().spawn(async move {
+                    let result = engine.download(&release, |got, tot| {
+                        d.store(got, Ordering::Relaxed);
+                        t.store(tot.unwrap_or(0), Ordering::Relaxed);
+                    });
+                    fin.store(true, Ordering::Relaxed);
+                    result
+                })
             };
-            let artifact = match downloaded {
+
+            loop {
+                let got = downloaded.load(Ordering::Relaxed);
+                let tot = total.load(Ordering::Relaxed);
+                this.update(cx, |this, cx| {
+                    this.set_status(
+                        UpdateStatus::Downloading {
+                            downloaded: got,
+                            total: (tot != 0).then_some(tot),
+                        },
+                        cx,
+                    );
+                })
+                .ok();
+                if done.load(Ordering::Relaxed) {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+            }
+
+            let artifact = match dl_task.await {
                 Ok(path) => path,
                 Err(e) => {
                     this.update(cx, |this, cx| {
