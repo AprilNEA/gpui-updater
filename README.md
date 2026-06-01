@@ -51,7 +51,17 @@ version.
 
 ## Usage
 
-### Blocking engine (any app, CLI included)
+### Pick an update source
+
+Use one of the built-in sources, or implement `UpdateSource` for your own
+release service:
+
+| Source | Best for | How it works |
+| --- | --- | --- |
+| `GitHubSource` | Existing GitHub Releases pipelines | Calls the GitHub Releases API, selects a matching asset, and can read `SHA256SUMS` / `.minisig` assets. |
+| `StaticManifestSource` | Cloudflare R2, S3, MinIO, B2, CDNs, static hosting | Fetches a static `latest.json`, selects an asset from `assets[]`, then downloads the asset URL directly. |
+
+### GitHub Releases
 
 ```rust
 use gpui_updater::{EngineConfig, GitHubSource, UpdateEngine};
@@ -80,7 +90,8 @@ if let Some(release) = engine.check()? {
 Use `StaticManifestSource` when your release metadata is hosted as a static JSON
 file on Cloudflare R2, AWS S3, MinIO, Backblaze B2, GitHub Pages, or any normal
 HTTPS file server. The updater does not speak the S3 API; it fetches JSON and
-downloads direct artifact URLs.
+downloads direct artifact URLs. This keeps credentials and provider SDKs out of
+the app: upload artifacts however you like, then publish a small JSON pointer.
 
 ```rust
 use gpui_updater::{EngineConfig, StaticManifestSource, UpdateEngine};
@@ -98,6 +109,20 @@ Manifest v1 describes one latest release and a flat list of downloadable assets.
 required fields; all other fields are optional and unknown fields are ignored.
 Put channel pointers at mutable URLs such as `/channels/stable/latest.json`, but
 keep artifact URLs versioned and immutable.
+
+Recommended layout:
+
+```text
+https://dl.example.com/
+├── channels/
+│   └── stable/
+│       └── latest.json          # mutable pointer
+└── releases/
+    └── v1.2.3/
+        ├── App-1.2.3-macos-arm64.dmg
+        ├── App-1.2.3-macos-arm64.dmg.minisig
+        └── SHA256SUMS
+```
 
 ```json
 {
@@ -130,6 +155,30 @@ keep artifact URLs versioned and immutable.
 inline minisign signature; `signature_url` may point to a detached signature file.
 If both are present and a minisign public key is configured, the inline signature
 is used.
+
+Asset selection is explicit when you use `os`, `arch`, and `format`:
+
+```rust
+let source = StaticManifestSource::new("https://dl.example.com/channels/stable/latest.json")
+    .os("macos")
+    .arch("arm64")
+    .format("dmg");
+```
+
+You can also add filename substring filters with `asset_contains(...)`, or
+replace them completely with `asset_patterns(...)`. Matching is
+case-insensitive. If no selector is configured, the source falls back to a
+platform extension guess: `.dmg` on macOS, `.exe` on Windows, and `.tar.gz` on
+Linux/other platforms.
+
+For R2/S3-style hosting, the recommended release flow is:
+
+1. Build and sign/notarize platform artifacts.
+2. Upload artifacts to an immutable, versioned prefix such as
+   `/releases/v1.2.3/`.
+3. Generate SHA-256 hashes and, optionally, minisign signatures.
+4. Upload `latest.json` to a mutable channel prefix such as
+   `/channels/stable/latest.json` after all artifacts are in place.
 
 ### GPUI entity
 
@@ -170,6 +219,18 @@ Downloading { downloaded, total } → Installing → Staged(v) | Errored(msg)`.
 - The `gpui` feature pulls `gpui` from the zed git repo (no registry release),
   so it needs the same native toolchain GPUI itself requires (a real Xcode +
   Metal on macOS). The core (default features) builds with stable Rust alone.
+
+## Development notes
+
+On macOS inside some Nix shells, Cargo may pick Nix's clang wrapper as `cc` and
+fail to link build scripts with missing system symbols such as `__Unwind_*` or
+`_pthread_*`. Point Cargo at Apple's linker for the host target:
+
+```bash
+CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc cargo test
+```
+
+The same prefix works for `cargo check` and `cargo clippy`.
 
 ## License
 
