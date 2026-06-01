@@ -112,11 +112,13 @@ impl<S: UpdateSource> UpdateEngine<S> {
         if let Some(expected) = &release.sha256 {
             verify::verify_sha256(&artifact, expected)?;
         }
-        if let (Some(key), Some(sig_url)) =
-            (&self.config.minisign_public_key, &release.signature_url)
-        {
-            let signature = http::get_string(sig_url, &[])?;
-            verify::verify_minisign(&artifact, key, &signature)?;
+        if let Some(key) = &self.config.minisign_public_key {
+            if let Some(signature) = &release.signature {
+                verify::verify_minisign(&artifact, key, signature)?;
+            } else if let Some(sig_url) = &release.signature_url {
+                let signature = http::get_string(sig_url, &[])?;
+                verify::verify_minisign(&artifact, key, &signature)?;
+            }
         }
         Ok(artifact)
     }

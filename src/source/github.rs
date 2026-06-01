@@ -172,6 +172,7 @@ impl UpdateSource for GitHubSource {
                 .filter(|s| !s.trim().is_empty())
                 .or(release.name),
             asset,
+            signature: None,
             signature_url,
             sha256,
         })

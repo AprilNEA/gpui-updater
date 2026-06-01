@@ -1,4 +1,5 @@
-//! Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases.
+//! Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases
+//! or static JSON manifests.
 //!
 //! GPUI ships no updater of its own, and Zed's `auto_update` is GPL-licensed and
 //! wired to Zed's private update server. This crate is an independent, MIT/Apache
@@ -7,7 +8,8 @@
 //!
 //! # Layers
 //!
-//! - [`UpdateSource`] — where releases come from. [`GitHubSource`] is built in.
+//! - [`UpdateSource`] — where releases come from. [`GitHubSource`] and
+//!   [`StaticManifestSource`] are built in.
 //! - [`UpdateEngine`] — the blocking pipeline: [`check`](UpdateEngine::check) →
 //!   [`download`](UpdateEngine::download) (with SHA-256 + minisign verification) →
 //!   [`install`](UpdateEngine::install).
@@ -70,7 +72,7 @@ pub use release::{Asset, Release, parse_tag};
 /// Re-exported so consumers can build an [`EngineConfig`] without depending on
 /// `semver` directly (e.g. `Version::parse(env!("CARGO_PKG_VERSION"))`).
 pub use semver::Version;
-pub use source::{GitHubSource, UpdateSource};
+pub use source::{GitHubSource, StaticManifestSource, UpdateSource};
 
 #[cfg(feature = "gpui")]
 pub use gpui_integration::{UpdateStatus, Updater};

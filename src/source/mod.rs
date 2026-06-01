@@ -1,12 +1,14 @@
 //! Where to look for releases.
 //!
 //! A [`UpdateSource`] knows how to fetch the latest release metadata. The
-//! crate ships a [`GitHubSource`]; implement the trait yourself to read from a
-//! static JSON feed, a self-hosted endpoint, GitLab, etc.
+//! crate ships [`GitHubSource`] and [`StaticManifestSource`]; implement the
+//! trait yourself to read from a self-hosted endpoint, GitLab, etc.
 
 mod github;
+mod manifest;
 
 pub use github::GitHubSource;
+pub use manifest::StaticManifestSource;
 
 use crate::error::Result;
 use crate::release::Release;

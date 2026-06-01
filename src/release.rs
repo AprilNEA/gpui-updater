@@ -24,6 +24,8 @@ pub struct Release {
     pub notes: Option<String>,
     /// The platform artifact to download and install.
     pub asset: Asset,
+    /// Inline detached minisign signature for `asset`, when published.
+    pub signature: Option<String>,
     /// URL of a detached minisign signature for `asset`, when published.
     pub signature_url: Option<String>,
     /// Expected lowercase hex SHA-256 of `asset`, when the source could resolve

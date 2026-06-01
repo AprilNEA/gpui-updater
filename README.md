@@ -1,6 +1,7 @@
 # gpui-updater
 
-Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases.
+Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases or
+static JSON manifests.
 
 GPUI ships no updater of its own, and Zed's `auto_update` crate is GPL-licensed
 and wired to Zed's private update server. `gpui-updater` is an independent,
@@ -11,8 +12,9 @@ platform artifact, verify it, and swap it into place.
 
 - **Sources** — `GitHubSource` reads a repo's Releases (latest or pre-releases),
   picks the asset for the running platform, and resolves a `SHA256SUMS`
-  checksum and an optional `.minisig` signature. Bring your own by implementing
-  `UpdateSource`.
+  checksum and an optional `.minisig` signature. `StaticManifestSource` reads a
+  CDN/S3/R2-friendly `latest.json` with a flat asset list. Bring your own by
+  implementing `UpdateSource`.
 - **Verification** — SHA-256 against the published checksums, plus optional
   [minisign] (Ed25519) signature verification. Transport security alone is not
   trusted.
@@ -37,10 +39,10 @@ Install from git instead:
 ```toml
 [dependencies]
 # Core only (blocking engine, no GPUI):
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.2" }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.3" }
 
 # With the GPUI integration (Entity<Updater>):
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.2", features = ["gpui"] }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.3", features = ["gpui"] }
 ```
 
 When your app already depends on `gpui` from the same zed git source, Cargo
@@ -72,6 +74,62 @@ if let Some(release) = engine.check()? {
     engine.install(&artifact)?;
 }
 ```
+
+### Static manifests (S3/R2/CDN)
+
+Use `StaticManifestSource` when your release metadata is hosted as a static JSON
+file on Cloudflare R2, AWS S3, MinIO, Backblaze B2, GitHub Pages, or any normal
+HTTPS file server. The updater does not speak the S3 API; it fetches JSON and
+downloads direct artifact URLs.
+
+```rust
+use gpui_updater::{EngineConfig, StaticManifestSource, UpdateEngine};
+
+let source = StaticManifestSource::new("https://dl.example.com/channels/stable/latest.json")
+    .os("macos")
+    .arch("arm64")
+    .format("dmg");
+
+let engine = UpdateEngine::new(source, EngineConfig::new(current_version));
+```
+
+Manifest v1 describes one latest release and a flat list of downloadable assets.
+`schema_version`, `version`, `assets[].name`, and `assets[].url` are the only
+required fields; all other fields are optional and unknown fields are ignored.
+Put channel pointers at mutable URLs such as `/channels/stable/latest.json`, but
+keep artifact URLs versioned and immutable.
+
+```json
+{
+  "schema_version": 1,
+  "app_id": "org.example.App",
+  "version": "1.2.3",
+  "tag": "v1.2.3",
+  "channel": "stable",
+  "published_at": "2026-06-01T12:00:00Z",
+  "release_url": "https://example.com/releases/v1.2.3",
+  "notes": "Markdown release notes.",
+  "assets": [
+    {
+      "name": "App-1.2.3-macos-arm64.dmg",
+      "url": "https://dl.example.com/releases/v1.2.3/App-1.2.3-macos-arm64.dmg",
+      "os": "macos",
+      "arch": "arm64",
+      "format": "dmg",
+      "size": 12345678,
+      "sha256": "0123456789abcdef...",
+      "signature": null,
+      "signature_url": null,
+      "minimum_os_version": "13.0"
+    }
+  ]
+}
+```
+
+`sha256` is checked after download when present. `signature` may contain an
+inline minisign signature; `signature_url` may point to a detached signature file.
+If both are present and a minisign public key is configured, the inline signature
+is used.
 
 ### GPUI entity
 
