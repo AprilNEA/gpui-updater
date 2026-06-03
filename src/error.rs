@@ -36,6 +36,12 @@ pub enum Error {
     #[error("signature verification failed: {0}")]
     Signature(String),
 
+    /// The configured [`Verification`](crate::Verification) policy required a
+    /// check that could not run because its input was missing — no public key,
+    /// no published signature, or no published checksum.
+    #[error("verification policy not satisfied: {0}")]
+    VerificationRequired(String),
+
     /// Installing the downloaded update failed.
     #[error("install failed: {0}")]
     Install(String),
