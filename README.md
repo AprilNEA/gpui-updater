@@ -156,6 +156,30 @@ inline minisign signature; `signature_url` may point to a detached signature fil
 If both are present and a minisign public key is configured, the inline signature
 is used.
 
+By default (`Verification::BestEffort`) these checks are skipped when their input
+is absent, so an unsigned release still installs. To **fail closed**, set a
+stricter policy:
+
+```rust
+use gpui_updater::Verification;
+
+EngineConfig::new(current_version)
+    .minisign_public_key("RWQ…")
+    .verification(Verification::Strict);
+```
+
+| Policy | Behaviour |
+| ------ | --------- |
+| `BestEffort` (default) | Verify what's available; skip missing checks (fails open). |
+| `Off` | Skip all checks (tests/local dev only). |
+| `Checksum` | Require a matching SHA-256. |
+| `Signature` | Require a public key **and** an advertised minisign signature. |
+| `Strict` | Require both a valid signature and a matching SHA-256. |
+
+Under `Signature`/`Strict`, a release that cannot be verified is rejected at
+`check()` time — before it is ever surfaced as available — and again before a
+download is verified.
+
 Asset selection is explicit when you use `os`, `arch`, and `format`:
 
 ```rust

@@ -65,7 +65,7 @@ pub mod verify;
 #[cfg(feature = "gpui")]
 mod gpui_integration;
 
-pub use engine::{EngineConfig, UpdateEngine};
+pub use engine::{EngineConfig, UpdateEngine, Verification};
 pub use error::{Error, Result};
 pub use install::{Installed, current_install_root};
 pub use release::{Asset, Release, parse_tag};
