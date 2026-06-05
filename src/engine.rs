@@ -44,6 +44,10 @@ pub enum Verification {
 }
 
 impl Verification {
+    fn skips_all(self) -> bool {
+        matches!(self, Self::Off)
+    }
+
     fn requires_signature(self) -> bool {
         matches!(self, Self::Signature | Self::Strict)
     }
@@ -95,9 +99,14 @@ impl EngineConfig {
         self
     }
 
-    /// Fail closed when the policy requires a check the release metadata cannot
-    /// satisfy. Run at check time so an unverifiable release is never surfaced
-    /// as available, and again before verifying a download.
+    /// Fail closed when the policy requires a check the release *metadata*
+    /// cannot satisfy (no public key, no advertised signature, no checksum).
+    ///
+    /// Run at check time so an obviously unverifiable release is not surfaced as
+    /// available, and again before a download. This validates presence only: a
+    /// release advertising a `signature_url` passes here even if that URL later
+    /// fails to fetch or yields an invalid signature — those are caught when the
+    /// download is verified.
     fn precheck(&self, release: &Release) -> Result<()> {
         if self.verification.requires_signature() {
             if self.minisign_public_key.is_none() {
@@ -200,17 +209,30 @@ impl<S: UpdateSource> UpdateEngine<S> {
     /// rejected before the artifact is read), then runs whatever checks the
     /// release does provide.
     fn verify_artifact(&self, artifact: &Path, release: &Release) -> Result<()> {
-        if self.config.verification == Verification::Off {
+        let policy = self.config.verification;
+        if policy.skips_all() {
             return Ok(());
         }
+        // `download` is public and may be called without `check`, so re-run the
+        // check-time gate here rather than trusting the caller went through it.
         self.config.precheck(release)?;
 
-        if let Some(expected) = &release.sha256 {
+        if let Some(expected) = non_empty(release.sha256.as_deref()) {
             verify::verify_sha256(artifact, expected)?;
         }
         if let Some(key) = &self.config.minisign_public_key {
-            if let Some(signature) = resolve_signature(release)? {
-                verify::verify_minisign(artifact, key, &signature)?;
+            match resolve_signature(release)? {
+                Some(signature) => verify::verify_minisign(artifact, key, &signature)?,
+                // `precheck` already accepted a non-empty `signature_url`, but the
+                // fetched body turned out blank. Fail closed instead of relying on
+                // the verifier to reject an empty signature string.
+                None if policy.requires_signature() => {
+                    return Err(Error::VerificationRequired(
+                        "policy requires a minisign signature, but the published signature is empty"
+                            .into(),
+                    ));
+                }
+                None => {}
             }
         }
         Ok(())
@@ -262,13 +284,15 @@ fn release_has_signature(release: &Release) -> bool {
 }
 
 /// The minisign signature for a release: the inline value if present, otherwise
-/// fetched from `signature_url`. `None` when the release advertises neither.
+/// fetched from `signature_url`. `None` when the release advertises neither, or
+/// when a fetched signature body is blank.
 fn resolve_signature(release: &Release) -> Result<Option<String>> {
     if let Some(signature) = non_empty(release.signature.as_deref()) {
         return Ok(Some(signature.to_string()));
     }
     if let Some(url) = non_empty(release.signature_url.as_deref()) {
-        return Ok(Some(http::get_string(url, &[])?));
+        let body = http::get_string(url, &[])?;
+        return Ok(non_empty(Some(&body)).map(str::to_string));
     }
     Ok(None)
 }
@@ -391,6 +415,24 @@ mod tests {
                 .verify_artifact(path, &release(Some("abc"), None, None))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn blank_checksum_is_treated_as_absent_not_verified() {
+        // A `"sha256": ""` (or whitespace) field reaches us as Some("") from the
+        // manifest source. It must be skipped like a missing checksum, not run
+        // through verify_sha256 against a blank expected hash — which would read
+        // the (here nonexistent) artifact and spuriously fail every download.
+        let engine = UpdateEngine::new(PanicSource, config(Verification::BestEffort, None));
+        let path = Path::new("/nonexistent/app.dmg");
+        for blank in ["", "   "] {
+            assert!(
+                engine
+                    .verify_artifact(path, &release(Some(blank), None, None))
+                    .is_ok(),
+                "blank sha256 {blank:?} should be treated as absent"
+            );
+        }
     }
 
     /// A source whose `fetch_latest` must never be called: the policy tests
