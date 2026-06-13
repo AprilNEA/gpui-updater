@@ -51,8 +51,13 @@ pub(crate) fn install(dmg: &Path, app_root: &Path) -> Result<Installed> {
     }
     let _ = fs::remove_dir_all(&backup);
 
-    let restart_binary = first_file_in(&app_root.join("Contents/MacOS"));
-    Ok(Installed { restart_binary })
+    // Restart into the `.app` bundle, not the executable inside it. GPUI's macOS
+    // `restart` relaunches via `open <path>`; pointed at a bare Mach-O binary,
+    // `open` has no GUI handler for it and falls back to running it inside
+    // Terminal. Handing `open` the bundle launches it detached, as a GUI app.
+    Ok(Installed {
+        restart_path: Some(app_root.to_path_buf()),
+    })
 }
 
 /// A mounted DMG that detaches itself (and removes its mount point) on drop.
@@ -118,13 +123,6 @@ fn ditto(src: &Path, dst: &Path) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn first_file_in(dir: &Path) -> Option<PathBuf> {
-    fs::read_dir(dir).ok()?.flatten().find_map(|e| {
-        let path = e.path();
-        path.is_file().then_some(path)
-    })
 }
 
 fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {

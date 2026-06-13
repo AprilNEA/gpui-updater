@@ -47,7 +47,7 @@ pub(crate) fn install(tarball: &Path, install_root: &Path) -> Result<Installed> 
     result?;
 
     Ok(Installed {
-        restart_binary: Some(install_root.to_path_buf()),
+        restart_path: Some(install_root.to_path_buf()),
     })
 }
 
