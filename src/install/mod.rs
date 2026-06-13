@@ -23,10 +23,13 @@ mod windows;
 /// Outcome of installing an update.
 #[derive(Debug, Clone)]
 pub struct Installed {
-    /// Path to the executable to relaunch into the new version. The GPUI
-    /// integration feeds this to `App::set_restart_path`. `None` means the
-    /// running location was updated in place with no new binary path.
-    pub restart_binary: Option<PathBuf>,
+    /// Path to relaunch into the new version, fed to `App::set_restart_path` by
+    /// the GPUI integration. This is what GPUI's platform `restart` consumes, so
+    /// it is platform-shaped: on macOS the `.app` bundle (relaunched via `open`,
+    /// which needs the bundle, not the inner Mach-O — that would open in
+    /// Terminal); on Linux/Windows the executable itself. `None` means the
+    /// running location was updated in place with no new path to restart into.
+    pub restart_path: Option<PathBuf>,
 }
 
 /// Install a downloaded update artifact over `install_root`.

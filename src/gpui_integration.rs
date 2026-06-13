@@ -231,8 +231,8 @@ impl Updater {
                 this.task = None;
                 match installed {
                     Ok(installed) => {
-                        if let Some(binary) = &installed.restart_binary {
-                            cx.set_restart_path(binary.clone());
+                        if let Some(path) = &installed.restart_path {
+                            cx.set_restart_path(path.clone());
                         }
                         let version = release.version.clone();
                         this.set_status(UpdateStatus::Staged(version), cx);

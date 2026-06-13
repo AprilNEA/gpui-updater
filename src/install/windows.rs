@@ -39,6 +39,6 @@ pub(crate) fn install(new_exe: &Path, install_root: &Path) -> Result<Installed> 
     }
 
     Ok(Installed {
-        restart_binary: Some(install_root.to_path_buf()),
+        restart_path: Some(install_root.to_path_buf()),
     })
 }
