@@ -136,8 +136,10 @@ fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::bundle_root;
+    use super::{bundle_root, install, unique_temp_dir};
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     #[test]
     fn finds_enclosing_app_bundle() {
@@ -151,5 +153,33 @@ mod tests {
     #[test]
     fn returns_none_when_not_in_a_bundle() {
         assert_eq!(bundle_root(Path::new("/usr/local/bin/tool")), None);
+    }
+
+    #[test]
+    fn install_restart_path_is_the_app_bundle_root() {
+        let work = unique_temp_dir("gpui-updater-test").unwrap();
+        let payload = work.join("payload");
+        fs::create_dir_all(payload.join("Demo.app/Contents/MacOS")).unwrap();
+        fs::write(payload.join("Demo.app/Contents/MacOS/demo"), "new").unwrap();
+
+        let dmg = work.join("update.dmg");
+        let status = Command::new("hdiutil")
+            .args(["create", "-quiet", "-srcfolder"])
+            .arg(&payload)
+            .arg(&dmg)
+            .status()
+            .unwrap();
+        assert!(status.success(), "hdiutil create failed");
+
+        let app_root = work.join("Applications/Demo.app");
+        fs::create_dir_all(app_root.join("Contents/MacOS")).unwrap();
+        fs::write(app_root.join("Contents/MacOS/demo"), "old").unwrap();
+
+        let installed = install(&dmg, &app_root).unwrap();
+        assert_eq!(installed.restart_path, Some(app_root.clone()));
+        let swapped = fs::read_to_string(app_root.join("Contents/MacOS/demo")).unwrap();
+        assert_eq!(swapped, "new");
+
+        let _ = fs::remove_dir_all(&work);
     }
 }
