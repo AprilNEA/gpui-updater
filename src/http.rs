@@ -1,17 +1,19 @@
 //! Minimal blocking HTTP helpers built on `ureq`.
 //!
 //! These run synchronously; the GPUI integration drives them from a background
-//! executor so the UI thread is never blocked. Every request goes through a
-//! configured [`Agent`] with connect and response-header timeouts (but no
-//! body-read cap, so a large but still-progressing download is never killed),
-//! and transient transport failures are retried with backoff — so a momentary
+//! executor so the UI thread is never blocked. Every phase of a request is
+//! bounded so nothing hangs forever — DNS resolution, connect, and the wait for
+//! response headers each have a deadline, while a download body has only a
+//! stall cap, so a large but still-progressing artifact is never killed — and
+//! transient transport failures are retried with backoff, so a momentary
 //! network blip, a VPN reconnect, or a dropped keep-alive doesn't abort an
 //! update with a hard error.
 
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::thread::sleep;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use ureq::Agent;
@@ -21,13 +23,27 @@ use crate::error::{Error, Result};
 /// `User-Agent` sent on every request. GitHub rejects API requests without one.
 pub(crate) const USER_AGENT: &str = concat!("gpui-updater/", env!("CARGO_PKG_VERSION"));
 
-/// Bound on DNS + TCP + TLS connect.
+/// Bound applied separately to DNS resolution (`timeout_resolve`) and to the
+/// TCP + TLS connect (`timeout_connect`) — in `ureq` these are distinct phases
+/// and `timeout_connect` alone leaves DNS unbounded.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Bound on receiving the response status line and headers. Caps a black-holed
-/// connection (accepted but silent) so a download can't hang the UI forever,
-/// without limiting how long a large, still-progressing artifact may take.
+/// Bound on a whole metadata response. `ureq`'s receive-response deadline keeps
+/// counting through body reads (`RecvBody` also checks the `RecvResponse`
+/// deadline), so this caps headers and body together — fine for small JSON and
+/// checksum bodies, wrong for artifacts, which is why downloads use
+/// [`download_agent`] instead.
 const RECV_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on a single body-read wait during a download. `ureq` re-arms the
+/// current phase's deadline on every read, so this kills a stalled stream but
+/// never one that keeps delivering bytes.
+const BODY_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on everything before a download's first body byte — DNS, connect,
+/// request send, and response headers — enforced by [`call_with_deadline`]
+/// because setting `timeout_recv_response` would cap the whole body too.
+const PRE_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Retries after the initial attempt for a single request. With the backoff
 /// below this gives a total retry window of ~11s — long enough to ride out a
@@ -49,13 +65,27 @@ fn backoff(attempt: u32) -> Duration {
         .min(RETRY_MAX_DELAY)
 }
 
-/// A configured agent: shared User-Agent plus connect / response-header
-/// timeouts. Cheap to build; one per top-level call.
-fn agent() -> Agent {
+/// Agent for small metadata requests: every phase through the (small) body is
+/// bounded, including DNS. Cheap to build; one per top-level call.
+fn metadata_agent() -> Agent {
     Agent::config_builder()
         .user_agent(USER_AGENT)
+        .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(RECV_RESPONSE_TIMEOUT))
+        .build()
+        .into()
+}
+
+/// Agent for artifact downloads: bounded DNS and connect, a stall cap of
+/// `stall` on body reads, and deliberately no receive-response deadline — see
+/// [`RECV_RESPONSE_TIMEOUT`] for why that would cap the whole body.
+fn download_agent(stall: Duration) -> Agent {
+    Agent::config_builder()
+        .user_agent(USER_AGENT)
+        .timeout_resolve(Some(CONNECT_TIMEOUT))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_recv_body(Some(stall))
         .build()
         .into()
 }
@@ -114,7 +144,7 @@ fn retrying<T>(
         match attempt() {
             Ok(value) => return Ok(value),
             Err(e) if tries < MAX_RETRIES && is_transient(&e) => {
-                sleep(backoff(tries));
+                thread::sleep(backoff(tries));
                 tries += 1;
             }
             Err(e) => return Err(e),
@@ -142,14 +172,14 @@ pub(crate) fn get_json<T: serde::de::DeserializeOwned>(
     url: &str,
     headers: &[(&str, &str)],
 ) -> Result<T> {
-    let agent = agent();
+    let agent = metadata_agent();
     let body = retrying(|| get_bytes(&agent, url, headers)).map_err(|e| finalize(url, e))?;
     serde_json::from_slice(&body).map_err(|e| Error::Parse(e.to_string()))
 }
 
 /// `GET` a URL and return the body as text, retrying transient failures.
 pub(crate) fn get_string(url: &str, headers: &[(&str, &str)]) -> Result<String> {
-    let agent = agent();
+    let agent = metadata_agent();
     let bytes = retrying(|| get_bytes(&agent, url, headers)).map_err(|e| finalize(url, e))?;
     String::from_utf8(bytes).map_err(|e| Error::Parse(e.to_string()))
 }
@@ -165,15 +195,28 @@ pub(crate) fn download(
     url: &str,
     headers: &[(&str, &str)],
     dest: &Path,
+    progress: impl FnMut(u64, Option<u64>),
+) -> Result<()> {
+    let agent = download_agent(BODY_STALL_TIMEOUT);
+    download_with(&agent, PRE_BODY_TIMEOUT, url, headers, dest, progress)
+}
+
+/// Retry loop around [`download_once`], parameterized so tests can run with
+/// tight deadlines.
+fn download_with(
+    agent: &Agent,
+    pre_body: Duration,
+    url: &str,
+    headers: &[(&str, &str)],
+    dest: &Path,
     mut progress: impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let agent = agent();
     let mut tries: u32 = 0;
     loop {
-        match download_once(&agent, url, headers, dest, &mut progress) {
+        match download_once(agent, pre_body, url, headers, dest, &mut progress) {
             Ok(()) => return Ok(()),
             Err((_, transient)) if transient && tries < MAX_RETRIES => {
-                sleep(backoff(tries));
+                thread::sleep(backoff(tries));
                 tries += 1;
                 progress(0, None);
             }
@@ -182,23 +225,59 @@ pub(crate) fn download(
     }
 }
 
+/// Run a download's GET up to the response headers on a helper thread with a
+/// hard deadline — the only way to bound a black-holed pre-body phase without
+/// `timeout_recv_response` leaking into the body. A deadline miss is transient:
+/// the canonical cause is a VPN drop black-holing an established connection.
+fn call_with_deadline(
+    agent: &Agent,
+    deadline: Duration,
+    url: &str,
+    headers: &[(&str, &str)],
+) -> std::result::Result<ureq::http::Response<ureq::Body>, (Error, bool)> {
+    let (tx, rx) = mpsc::channel();
+    let agent = agent.clone();
+    let owned_url = url.to_string();
+    let owned_headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    // On a deadline miss this thread stays blocked until the OS gives up on the
+    // socket, then exits; its send into the dropped channel is ignored.
+    thread::spawn(move || {
+        let mut req = agent
+            .get(&owned_url)
+            .header("accept", "application/octet-stream");
+        for (k, v) in &owned_headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let _ = tx.send(req.call());
+    });
+    match rx.recv_timeout(deadline) {
+        Ok(Ok(resp)) => Ok(resp),
+        Ok(Err(e)) => {
+            let transient = is_transient(&e);
+            Err((http_err(e), transient))
+        }
+        Err(_) => Err((
+            Error::Http(format!("GET {url} -> no response within {deadline:?}")),
+            true,
+        )),
+    }
+}
+
 /// One download attempt. The bool in the error is whether it is worth retrying:
 /// a connect/status/mid-stream transport failure is, a local write failure
 /// (disk full, permissions) is not.
 fn download_once(
     agent: &Agent,
+    pre_body: Duration,
     url: &str,
     headers: &[(&str, &str)],
     dest: &Path,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> std::result::Result<(), (Error, bool)> {
-    let mut resp = build(agent, url, headers)
-        .header("accept", "application/octet-stream")
-        .call()
-        .map_err(|e| {
-            let transient = is_transient(&e);
-            (http_err(e), transient)
-        })?;
+    let mut resp = call_with_deadline(agent, pre_body, url, headers)?;
     let status = resp.status();
     if !status.is_success() {
         let code = status.as_u16();
@@ -237,7 +316,7 @@ mod tests {
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::thread;
+    use std::time::Instant;
 
     /// Deterministic "update artifact" bytes, stable so a download can be
     /// asserted byte-for-byte and a truncated copy is detectable. Kept ASCII so
@@ -258,6 +337,15 @@ mod tests {
         PartialBody,
         /// Answer 404 — a permanent error that must not be retried.
         NotFound,
+        /// Read the request then go silent with the socket held open — a
+        /// black-holed connection where response headers never arrive.
+        SilentAfterRequest,
+        /// Send headers + half the body, then go silent with the socket held
+        /// open — a mid-download stall rather than a close.
+        StallMidBody,
+        /// Send headers immediately, then trickle the body in delayed chunks —
+        /// a slow but always-progressing download.
+        TrickleBody,
     }
 
     /// Serve `fault` for the first `fail_first` connections, then a healthy
@@ -291,6 +379,13 @@ mod tests {
         let _ = stream.write_all(body);
     }
 
+    fn serve_head(stream: &mut TcpStream, content_length: usize) {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\n\r\n"
+        );
+    }
+
     fn handle(mut stream: TcpStream, fault: Option<Fault>) {
         match fault {
             Some(Fault::ResetAtConnect) => drop(stream),
@@ -302,16 +397,34 @@ mod tests {
             Some(Fault::PartialBody) => {
                 read_request(&mut stream);
                 let body = artifact();
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                    body.len()
-                );
+                serve_head(&mut stream, body.len());
                 let _ = stream.write_all(&body[..body.len() / 2]);
             }
             Some(Fault::NotFound) => {
                 read_request(&mut stream);
                 let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            }
+            Some(Fault::SilentAfterRequest) => {
+                read_request(&mut stream);
+                thread::sleep(Duration::from_secs(10));
+            }
+            Some(Fault::StallMidBody) => {
+                read_request(&mut stream);
+                let body = artifact();
+                serve_head(&mut stream, body.len());
+                let _ = stream.write_all(&body[..body.len() / 2]);
+                let _ = stream.flush();
+                thread::sleep(Duration::from_secs(10));
+            }
+            Some(Fault::TrickleBody) => {
+                read_request(&mut stream);
+                let body = artifact();
+                serve_head(&mut stream, body.len());
+                for chunk in body.chunks(body.len() / 8) {
+                    let _ = stream.write_all(chunk);
+                    let _ = stream.flush();
+                    thread::sleep(Duration::from_millis(150));
+                }
             }
             None => {
                 read_request(&mut stream);
@@ -375,6 +488,70 @@ mod tests {
         // A permanent 404 must fail fast — not retried into the backoff window.
         let (result, dest) = run_download(Fault::NotFound, usize::MAX, "permanent");
         assert!(result.is_err(), "expected a clean error, got {result:?}");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn slow_body_is_not_killed_while_progressing() {
+        // Regression test for the receive-response deadline leaking into body
+        // reads: the body takes ~1.2s against deadlines of 500ms, but each
+        // chunk arrives well within the stall cap, so it must complete. With
+        // `timeout_recv_response(500ms)` on the download agent this fails with
+        // `Timeout(RecvResponse)` half a second after the headers.
+        let addr = spawn_server(Fault::TrickleBody, usize::MAX);
+        let url = format!("http://{addr}/update.bin");
+        let dest = temp_dest("slow-body");
+        let tight = Duration::from_millis(500);
+        let result = download_with(&download_agent(tight), tight, &url, &[], &dest, |_, _| {});
+        assert!(
+            result.is_ok(),
+            "expected slow download to survive, got {result:?}"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), artifact());
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn black_holed_response_headers_fail_fast_and_transient() {
+        let addr = spawn_server(Fault::SilentAfterRequest, usize::MAX);
+        let url = format!("http://{addr}/update.bin");
+        let dest = temp_dest("black-hole");
+        let deadline = Duration::from_millis(300);
+        let started = Instant::now();
+        let result = download_once(
+            &download_agent(deadline),
+            deadline,
+            &url,
+            &[],
+            &dest,
+            &mut |_, _| {},
+        );
+        let elapsed = started.elapsed();
+        match result {
+            Err((_, transient)) => assert!(transient, "a black-holed response is transient"),
+            Ok(()) => panic!("expected the pre-body deadline to fire"),
+        }
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn recovers_from_midstream_stall() {
+        // First connection stalls silently mid-body (socket held open); the
+        // body stall cap must kill it and the retry must complete the download.
+        let addr = spawn_server(Fault::StallMidBody, 1);
+        let url = format!("http://{addr}/update.bin");
+        let dest = temp_dest("stall");
+        let result = download_with(
+            &download_agent(Duration::from_millis(300)),
+            PRE_BODY_TIMEOUT,
+            &url,
+            &[],
+            &dest,
+            |_, _| {},
+        );
+        assert!(result.is_ok(), "expected recovery, got {result:?}");
+        assert_eq!(std::fs::read(&dest).unwrap(), artifact());
         let _ = std::fs::remove_file(&dest);
     }
 
