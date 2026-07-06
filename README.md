@@ -6,7 +6,9 @@ static JSON manifests.
 GPUI ships no updater of its own, and Zed's `auto_update` crate is GPL-licensed
 and wired to Zed's private update server. `gpui-updater` is an independent,
 MIT/Apache implementation of the same idea: check a release source, download the
-platform artifact, verify it, and swap it into place.
+platform artifact, verify it, and swap it into place — on macOS (`.dmg`),
+Linux (`.tar.gz`), and Windows (bare `.exe`, or `.msi` for installer-shipped
+apps).
 
 ## What it does
 
@@ -196,7 +198,9 @@ You can also add filename substring filters with `asset_contains(...)`, or
 replace them completely with `asset_patterns(...)`. Matching is
 case-insensitive. If no selector is configured, the source falls back to a
 platform extension guess: `.dmg` on macOS, `.exe` on Windows, and `.tar.gz` on
-Linux/other platforms.
+Linux/other platforms. Installer-shipped Windows apps should select their MSI
+explicitly with `.format("msi")` — the install step stages it and applies via
+msiexec on restart.
 
 For R2/S3-style hosting, the recommended release flow is:
 
