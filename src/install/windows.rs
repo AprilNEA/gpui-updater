@@ -129,8 +129,7 @@ mod tests {
     #[test]
     fn dispatch_rejects_unknown_artifact_kinds() {
         // Neither .exe nor .msi: never copied, never staged.
-        let err = install(Path::new("C:\\dl\\app.zip"), Path::new("C:\\app\\app.exe"))
-            .unwrap_err();
+        let err = install(Path::new("C:\\dl\\app.zip"), Path::new("C:\\app\\app.exe")).unwrap_err();
         assert!(matches!(err, Error::UnsupportedPlatform(_)));
     }
 
@@ -169,7 +168,10 @@ mod tests {
         let script_path = installed.restart_path.unwrap();
         assert_eq!(script_path, msi.with_extension("apply.cmd"));
         let script = fs::read_to_string(script_path).unwrap();
-        assert!(script.contains(&format!("msiexec /i \"{}\" /passive /norestart", msi.display())));
+        assert!(script.contains(&format!(
+            "msiexec /i \"{}\" /passive /norestart",
+            msi.display()
+        )));
         assert!(script.contains(&format!("start \"\" \"{}\"", root.display())));
         // Relaunch is gated on msiexec succeeding.
         assert!(script.contains("if %errorlevel% neq 0 exit /b %errorlevel%"));
