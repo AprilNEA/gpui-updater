@@ -23,8 +23,11 @@ platform artifact, verify it, and swap it into place.
     the target volume, then atomically replace the bundle. Nothing is re-signed
     at runtime — the new bundle carries its own signature.
   - **Linux**: extract the `.tar.gz` and atomically replace the binary.
-  - **Windows**: rename-in-place for a bare `.exe` (installer/Restart-Manager
-    flow is future work).
+  - **Windows**: rename-in-place for a bare `.exe`, or a staged msiexec
+    handoff for an `.msi` — the verified package is applied
+    (`/passive /norestart`) after the app exits, via the restart path, then
+    the app relaunches. (Restart-Manager integration for locked sibling DLLs
+    remains future work.)
 - **GPUI integration** (`gpui` feature) — an observable `Entity<Updater>` that
   runs the work on the background executor and sets `App::set_restart_path` when
   an update is staged. No background polling: trigger checks explicitly, which

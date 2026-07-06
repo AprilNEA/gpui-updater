@@ -38,6 +38,9 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 # only compiled with the `gpui` feature.
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints.rust]
 unsafe_code = "forbid"
 

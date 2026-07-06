@@ -6,8 +6,9 @@
 //!   signature), then swap it into place. The new bundle carries its own
 //!   signature, so nothing is re-signed at runtime.
 //! - **Linux**: extract the `.tar.gz` and atomically replace the binary.
-//! - **Windows**: see [`windows`] — currently returns
-//!   [`Error::UnsupportedPlatform`]; a Restart-Manager helper is future work.
+//! - **Windows**: see [`windows`] — rename-in-place for a bare `.exe`, or a
+//!   staged msiexec handoff for an `.msi` (applied after the app exits, via
+//!   the restart path).
 
 use std::path::{Path, PathBuf};
 
@@ -27,14 +28,19 @@ pub struct Installed {
     /// the GPUI integration. This is what GPUI's platform `restart` consumes, so
     /// it is platform-shaped: on macOS the `.app` bundle (relaunched via `open`,
     /// which needs the bundle, not the inner Mach-O — that would open in
-    /// Terminal); on Linux/Windows the executable itself. `None` means the
-    /// running location was updated in place with no new path to restart into.
+    /// Terminal); on Linux the executable itself; on Windows the executable —
+    /// or, for a staged MSI, the generated apply script that installs the
+    /// package and relaunches the app (GPUI's Windows `restart` spawns the path
+    /// only after this process exits, which is the ordering msiexec needs).
+    /// `None` means the running location was updated in place with no new path
+    /// to restart into.
     pub restart_path: Option<PathBuf>,
 }
 
 /// Install a downloaded update artifact over `install_root`.
 ///
-/// - `artifact`: the downloaded file (`.dmg` on macOS, `.tar.gz` on Linux).
+/// - `artifact`: the downloaded file (`.dmg` on macOS, `.tar.gz` on Linux,
+///   `.exe` or `.msi` on Windows).
 /// - `install_root`: what to replace — on macOS the `.app` bundle directory,
 ///   on Linux the executable file. Use [`current_install_root`] to derive it.
 ///
