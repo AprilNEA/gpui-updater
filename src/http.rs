@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 use ureq::Agent;
+use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::error::{Error, Result};
 
@@ -65,11 +66,24 @@ fn backoff(attempt: u32) -> Duration {
         .min(RETRY_MAX_DELAY)
 }
 
+/// TLS setup shared by both agents: validate server certificates against the
+/// operating system's trust store (`rustls-platform-verifier`) instead of
+/// ureq's default bundled Mozilla roots. Enterprise TLS-inspection proxies
+/// (Zscaler et al.) re-sign every connection with a private CA that exists
+/// only in the OS store, so the bundled roots rejected every check behind one
+/// with "invalid peer certificate: `UnknownIssuer`".
+fn tls_config() -> TlsConfig {
+    TlsConfig::builder()
+        .root_certs(RootCerts::PlatformVerifier)
+        .build()
+}
+
 /// Agent for small metadata requests: every phase through the (small) body is
 /// bounded, including DNS. Cheap to build; one per top-level call.
 fn metadata_agent() -> Agent {
     Agent::config_builder()
         .user_agent(USER_AGENT)
+        .tls_config(tls_config())
         .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(RECV_RESPONSE_TIMEOUT))
@@ -83,6 +97,7 @@ fn metadata_agent() -> Agent {
 fn download_agent(stall: Duration) -> Agent {
     Agent::config_builder()
         .user_agent(USER_AGENT)
+        .tls_config(tls_config())
         .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_body(Some(stall))

@@ -29,7 +29,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
-ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 
 # gpui tracks zed's default branch — no `rev` here, matching how gpui-component
 # declares it, so a consumer's workspace (e.g. OpenLogi) unifies on its own
