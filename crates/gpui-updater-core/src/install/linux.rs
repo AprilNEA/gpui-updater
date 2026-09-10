@@ -103,3 +103,54 @@ fn unique_dir(parent: &Path, prefix: &str) -> Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installs_to_temporary_root_and_preserves_it_on_bad_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("demo");
+        let payload = dir.path().join("payload");
+        fs::create_dir(&payload).unwrap();
+        fs::write(&root, b"old binary").unwrap();
+        fs::write(payload.join("demo"), b"new binary").unwrap();
+        // A differently named executable must not override the exact-name match.
+        let other = payload.join("helper");
+        fs::write(&other, b"wrong binary").unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+        let archive = dir.path().join("update.tar.gz");
+        assert!(
+            Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&payload)
+                .arg(".")
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let installed = install(&archive, &root).unwrap();
+        assert_eq!(installed.restart_path, Some(root.clone()));
+        assert_eq!(fs::read(&root).unwrap(), b"new binary");
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        fs::write(&archive, b"not a tarball").unwrap();
+        assert!(matches!(install(&archive, &root), Err(Error::Install(_))));
+        assert_eq!(fs::read(&root).unwrap(), b"new binary");
+        assert!(!dir.path().join(".demo.new").exists());
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gpui-updater-stage")
+        }));
+    }
+}

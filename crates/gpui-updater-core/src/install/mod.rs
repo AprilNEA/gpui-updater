@@ -6,7 +6,7 @@
 //!   signature), then swap it into place. The new bundle carries its own
 //!   signature, so nothing is re-signed at runtime.
 //! - **Linux**: extract the `.tar.gz` and atomically replace the binary.
-//! - **Windows**: see [`windows`] — rename-in-place for a bare `.exe`, or a
+//! - **Windows**: rename-in-place for a bare `.exe`, or a
 //!   staged msiexec handoff for an `.msi` (applied after the app exits, via
 //!   the restart path).
 

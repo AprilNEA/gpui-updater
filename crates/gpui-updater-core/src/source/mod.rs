@@ -15,14 +15,14 @@ use crate::release::Release;
 
 /// A source of release metadata.
 ///
-/// Implementations perform blocking I/O; the updater calls them from a
-/// background executor.
+/// Implementations perform blocking I/O; callers must choose an appropriate
+/// thread or executor.
 pub trait UpdateSource: Send + Sync + 'static {
     /// Fetch the latest release applicable to the running platform.
     ///
     /// This returns the newest release the source knows about — comparing it
     /// against the currently running version is the caller's job (see
-    /// [`crate::Updater`] / [`crate::is_newer`]).
+    /// [`crate::UpdateEngine::check`]).
     ///
     /// # Errors
     /// Returns an error if the network request fails, the metadata cannot be
@@ -30,8 +30,7 @@ pub trait UpdateSource: Send + Sync + 'static {
     fn fetch_latest(&self) -> Result<Release>;
 }
 
-/// Forwarding impl so a boxed, type-erased source can drive the engine (used by
-/// the `gpui` integration, which stores a single monomorphic `Updater`).
+/// Forwarding impl so a boxed, type-erased source can drive the engine.
 impl UpdateSource for Box<dyn UpdateSource> {
     fn fetch_latest(&self) -> Result<Release> {
         (**self).fetch_latest()

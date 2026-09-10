@@ -23,7 +23,7 @@ use crate::release::{Asset, Release, parse_tag};
 /// are `name` and `url`.
 ///
 /// ```no_run
-/// use gpui_updater::StaticManifestSource;
+/// use gpui_updater_core::StaticManifestSource;
 ///
 /// let source = StaticManifestSource::new("https://dl.example.com/channels/stable/latest.json")
 ///     .os("macos")

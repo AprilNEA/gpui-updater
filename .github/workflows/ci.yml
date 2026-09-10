@@ -8,7 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
   RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
 
 jobs:
   fmt:
@@ -37,13 +39,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy -p gpui-updater-core --all-targets --locked -- -D warnings
+      - run: cargo doc -p gpui-updater-core --no-deps --locked
 
-  # Core (default features) builds and tests with stable Rust alone. Running the
+  # Core builds and tests at its own MSRV without GPUI. Running the
   # suite on every OS also compiles that platform's install strategy
   # (install/macos.rs, install/linux.rs, install/windows.rs).
   test:
-    name: tests (${{ matrix.os }})
+    name: core MSRV tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -51,19 +54,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets
+      - run: cargo test -p gpui-updater-core --all-targets --locked
+      - run: cargo test -p gpui-updater-core --doc --locked
 
-  # The `gpui` integration pulls gpui from the zed git repo. It builds most
-  # cheaply on Linux (x11/wayland backend, no Metal), with the same system libs
-  # GPUI itself needs. macOS coverage comes from the consuming app's own CI.
-  gpui:
-    name: check (gpui feature)
+  # Independent builds prevent workspace feature unification from concealing
+  # a dependency on the other backend. Native app coverage stays with consumers.
+  adapters:
+    name: registry adapter (${{ matrix.package }})
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [gpui-updater, gpui-updater-pre]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -73,4 +80,22 @@ jobs:
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
-      - run: cargo clippy --features gpui --all-targets -- -D warnings
+      - run: cargo clippy -p ${{ matrix.package }} --all-targets --locked -- -D warnings
+      - run: cargo test -p ${{ matrix.package }} --all-targets --locked
+      - run: cargo test -p ${{ matrix.package }} --doc --locked
+      - run: cargo doc -p ${{ matrix.package }} --no-deps --locked
+
+  packages:
+    name: extracted package consumers and dependency isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev pkg-config
+      - run: bash scripts/check-packages.sh

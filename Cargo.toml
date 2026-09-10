@@ -1,50 +1,19 @@
-[package]
-name = "gpui-updater"
-version = "0.0.7"
+[workspace]
+members = ["crates/gpui-updater-core", "crates/gpui-updater", "crates/gpui-updater-pre"]
+default-members = ["crates/gpui-updater-core"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AprilNEA/gpui-updater"
 authors = ["AprilNEA <dev@aprilnea.me>"]
-description = "A cross-platform updater for the GPUI desktop GUI toolkit"
-readme = "README.md"
-keywords = ["gpui", "updater", "auto-update", "self-update", "desktop"]
-categories = ["gui", "development-tools"]
 
-[lib]
-name = "gpui_updater"
-
-[features]
-default = []
-# Opt-in GPUI integration: an observable `Entity<Updater>` (see
-# src/gpui_integration.rs) that drives the engine on the app's executors. Off by
-# default so the core builds and tests without a Metal/GPU toolchain.
-gpui = ["dep:gpui"]
-
-[dependencies]
-minisign-verify = "0.2.5"
-semver = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-thiserror = "2"
-tracing = "0.1"
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
-
-# gpui tracks zed's default branch — no `rev` here, matching how gpui-component
-# declares it, so a consumer's workspace (e.g. OpenLogi) unifies on its own
-# pinned commit. When built standalone, the compatible commit is pinned in this
-# crate's Cargo.lock (bump it deliberately with `cargo update`). Optional and
-# only compiled with the `gpui` feature.
-gpui = { git = "https://github.com/zed-industries/zed", optional = true }
-
-[dev-dependencies]
-tempfile = "3"
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"

@@ -8,9 +8,9 @@
 //! `cx.restart()` launches the new version.
 //!
 //! ```no_run
-//! # use gpui::{Context, Entity};
+//! # use gpui::{AppContext as _, Context, Entity};
 //! # use gpui_updater::{EngineConfig, GitHubSource, UpdateStatus, Updater};
-//! # use semver::Version;
+//! # use gpui_updater::Version;
 //! fn build(cx: &mut Context<()>) {
 //!     let source = GitHubSource::new("AprilNEA", "OpenLogi")
 //!         .asset_contains("macos")
@@ -25,60 +25,27 @@
 //! }
 //! ```
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use gpui::{Context, Task};
-use semver::Version;
 
-use crate::engine::{EngineConfig, UpdateEngine};
-use crate::release::Release;
-use crate::source::UpdateSource;
+pub use gpui_updater_core::*;
 
 type BoxedEngine = UpdateEngine<Box<dyn UpdateSource>>;
 
-/// Observable state of an [`Updater`]. Read it in `render` and react to changes
-/// via `cx.observe(&updater, …)`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum UpdateStatus {
-    /// Nothing has been checked yet.
-    #[default]
-    Idle,
-    /// A check is in flight.
-    Checking,
-    /// The running version is the latest.
-    UpToDate,
-    /// A newer version is available; call [`Updater::download_and_install`].
-    Available(Version),
-    /// The update artifact is downloading. `total` is `None` until/unless the
-    /// server reports a `Content-Length`.
-    Downloading { downloaded: u64, total: Option<u64> },
-    /// The download is verified and being swapped into place.
-    Installing,
-    /// The update is installed; call [`Updater::restart`] to launch it.
-    Staged(Version),
-    /// The last operation failed.
-    Errored(String),
-}
-
-impl UpdateStatus {
-    /// Whether an operation is currently in flight.
-    #[must_use]
-    pub fn is_busy(&self) -> bool {
-        matches!(
-            self,
-            Self::Checking | Self::Downloading { .. } | Self::Installing
-        )
-    }
-}
-
 /// A GPUI entity that checks for, downloads, and installs updates.
 ///
-/// Construct it with [`cx.new`](gpui::App::new) and hold the resulting
+/// Construct it with [`cx.new`](gpui::AppContext::new) and hold the resulting
 /// `Entity<Updater>`. All work is triggered explicitly — there is no background
 /// polling — which suits a privacy-conscious "Check for updates" button. To
 /// poll, call [`check`](Self::check) yourself on a timer.
+///
+/// Dropping the entity cancels its foreground task, not an already-running
+/// blocking download or install. It does not roll back an installation.
 pub struct Updater {
     status: UpdateStatus,
     available: Option<Release>,
@@ -229,16 +196,10 @@ impl Updater {
             };
             this.update(cx, |this, cx| {
                 this.task = None;
-                match installed {
-                    Ok(installed) => {
-                        if let Some(path) = &installed.restart_path {
-                            cx.set_restart_path(path.clone());
-                        }
-                        let version = release.version.clone();
-                        this.set_status(UpdateStatus::Staged(version), cx);
-                    }
-                    Err(e) => this.set_status(UpdateStatus::Errored(e.to_string()), cx),
-                }
+                let status = installed_status(installed, release.version, |path| {
+                    cx.set_restart_path(path);
+                });
+                this.set_status(status, cx);
             })
             .ok();
         }));
@@ -250,3 +211,24 @@ impl Updater {
         cx.restart();
     }
 }
+
+// Official GPUI 0.2.2's TestPlatform discards restart paths. Keep the handoff
+// isolated so its exact path and error/None behavior can be tested safely.
+fn installed_status(
+    installed: Result<Installed>,
+    version: Version,
+    set_restart_path: impl FnOnce(std::path::PathBuf),
+) -> UpdateStatus {
+    match installed {
+        Ok(installed) => {
+            if let Some(path) = installed.restart_path {
+                set_restart_path(path);
+            }
+            UpdateStatus::Staged(version)
+        }
+        Err(e) => UpdateStatus::Errored(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests;

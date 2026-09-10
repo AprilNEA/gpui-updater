@@ -12,7 +12,7 @@ const API: &str = "https://api.github.com";
 /// Reads releases from a GitHub repository's Releases.
 ///
 /// ```no_run
-/// use gpui_updater::GitHubSource;
+/// use gpui_updater_core::GitHubSource;
 ///
 /// let source = GitHubSource::new("AprilNEA", "OpenLogi")
 ///     .asset_contains("macos")

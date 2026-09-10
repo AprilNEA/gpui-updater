@@ -2,13 +2,13 @@
 //! engine (no GPUI). Demonstrates the core API end to end.
 //!
 //! ```text
-//! cargo run --example check_github -- AprilNEA OpenLogi 0.0.0
+//! cargo run -p gpui-updater-core --example check_github -- AprilNEA OpenLogi 0.0.0
 //! ```
 //!
 //! The asset is auto-selected by the running OS (`.dmg` / `.exe` / `.tar.gz`),
 //! so run it on the platform whose artifact you want to resolve.
 
-use gpui_updater::{EngineConfig, GitHubSource, UpdateEngine};
+use gpui_updater_core::{EngineConfig, GitHubSource, UpdateEngine};
 use semver::Version;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,5 +1,5 @@
-//! Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases
-//! or static JSON manifests.
+//! Blocking cross-platform self-update, hosted on GitHub Releases or static
+//! JSON manifests. This core has no GPUI dependencies.
 //!
 //! GPUI ships no updater of its own, and Zed's `auto_update` is GPL-licensed and
 //! wired to Zed's private update server. This crate is an independent, MIT/Apache
@@ -15,14 +15,13 @@
 //!   [`install`](UpdateEngine::install).
 //! - [`install`] / [`verify`] — the platform install strategies and integrity
 //!   checks, usable on their own.
-//! - **`gpui` feature** — an `Entity`-based [`Updater`] driving the engine on the
-//!   app's executors, exposing an observable [`UpdateStatus`] and calling
-//!   `App::set_restart_path` when an update is staged.
+//! - [`UpdateStatus`] — backend-independent state used by the separate
+//!   `gpui-updater` (official GPUI) and `gpui-updater-pre` adapters.
 //!
 //! # Example (blocking engine)
 //!
 //! ```no_run
-//! use gpui_updater::{EngineConfig, GitHubSource, UpdateEngine};
+//! use gpui_updater_core::{EngineConfig, GitHubSource, UpdateEngine};
 //! use semver::Version;
 //!
 //! let source = GitHubSource::new("AprilNEA", "OpenLogi")
@@ -45,7 +44,7 @@
 //!     })?;
 //!     engine.install(&artifact)?;
 //! }
-//! # Ok::<_, gpui_updater::Error>(())
+//! # Ok::<_, gpui_updater_core::Error>(())
 //! ```
 //!
 //! [GPUI]: https://www.gpui.rs/
@@ -57,13 +56,11 @@ mod engine;
 mod error;
 mod http;
 mod release;
+mod status;
 
 pub mod install;
 pub mod source;
 pub mod verify;
-
-#[cfg(feature = "gpui")]
-mod gpui_integration;
 
 pub use engine::{EngineConfig, UpdateEngine, Verification};
 pub use error::{Error, Result};
@@ -73,6 +70,4 @@ pub use release::{Asset, Release, parse_tag};
 /// `semver` directly (e.g. `Version::parse(env!("CARGO_PKG_VERSION"))`).
 pub use semver::Version;
 pub use source::{GitHubSource, StaticManifestSource, UpdateSource};
-
-#[cfg(feature = "gpui")]
-pub use gpui_integration::{UpdateStatus, Updater};
+pub use status::UpdateStatus;
