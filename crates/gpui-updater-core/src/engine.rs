@@ -64,6 +64,11 @@ impl Verification {
 }
 
 /// Configuration for an [`UpdateEngine`].
+///
+/// Start from [`EngineConfig::new`] and chain the builder methods. The fields
+/// stay public for reading and adjusting; the struct is `#[non_exhaustive]`
+/// so new options can be added without a breaking release.
+#[non_exhaustive]
 pub struct EngineConfig {
     /// The currently running version, compared against the source's latest.
     pub current_version: Version,
