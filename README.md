@@ -409,7 +409,7 @@ cargo test --workspace --doc --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-bash scripts/check-packages.sh
+cargo xtask check-packages
 ```
 
 CI tests core/platform installers on Linux, macOS and Windows, and builds each
@@ -420,15 +420,19 @@ entity/task lifetime. `gpui-pre` captures the fake platform restart request;
 official 0.2.2 discards its path, so exact-path coverage uses a small isolated
 handoff boundary. No test restarts a real app or installs over the test binary.
 
-`scripts/check-packages.sh` packages all three crates without publishing,
+`cargo xtask check-packages` packages all four crates without publishing,
 checks archive contents, builds fresh consumers from extracted packages, and
-checks the selected normal/build dependency closures (core: no GPUI; official:
-no pre; pre: no official). Package locks may list unrelated platform/optional
-dependencies; they are not evidence that those dependencies are compiled.
+checks the selected normal/build dependency closures (core and Sparkle: no
+GPUI; official: no pre; pre: no official). Package locks may list unrelated
+platform/optional dependencies; they are not evidence that those dependencies
+are compiled. Pass package names to check only those, for example
+`cargo xtask check-packages gpui-updater-core gpui-updater-pre` on a Mac
+without the Metal toolchain.
 
 Release order: publish `gpui-updater-core` 0.1.0 first; after it is available in
-the registry, publish `gpui-updater` and `gpui-updater-pre` 0.1.0. Run normal
-package verification again before publishing. A repository tag is not needed
+the registry, publish `gpui-updater`, `gpui-updater-pre` and
+`gpui-updater-sparkle` 0.1.0. Run normal package verification again before
+publishing. A repository tag is not needed
 for registry resolution; if a coordinated release tag is created, `v0.1.0`
 should identify the reviewed workspace commit, not the old prototype. Never
 rewrite an existing release tag or embed a consumer's GPUI Git pin here.

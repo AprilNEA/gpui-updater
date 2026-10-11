@@ -109,6 +109,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: |
           sudo apt-get update
@@ -116,4 +118,6 @@ jobs:
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
-      - run: bash scripts/check-packages.sh
+      - run: cargo clippy -p xtask --all-targets --locked -- -D warnings
+      - run: cargo test -p xtask --locked
+      - run: cargo xtask check-packages
