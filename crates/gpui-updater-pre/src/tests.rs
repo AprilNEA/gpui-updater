@@ -245,7 +245,7 @@ async fn download_samples_progress_installs_and_releases_task(cx: &mut TestAppCo
     // gpui-pre exposes the fake platform's restart request. This never
     // launches the fixture or restarts this test process.
     let restart = cx.expect_restart();
-    updater.update(cx, |u, cx| u.restart(cx));
+    updater.update(cx, super::Updater::restart);
     let (path, arguments) = restart.await.unwrap();
     assert_eq!(path, Some(root.clone()));
     assert!(arguments.is_empty());
