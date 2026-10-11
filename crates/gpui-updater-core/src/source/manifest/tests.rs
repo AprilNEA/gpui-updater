@@ -15,6 +15,7 @@ fn asset_matching_requires_all_substrings_case_insensitively() {
         sha256: None,
         signature: None,
         signature_url: None,
+        ed25519_signature: None,
         os: Some("macos".to_string()),
         arch: Some("arm64".to_string()),
         format: Some("dmg".to_string()),
@@ -59,6 +60,7 @@ fn deserializes_manifest_with_flat_assets_and_unknown_fields() {
                 "size": 1234,
                 "sha256": "ABCDEF",
                 "signature": "trusted comment: sig",
+                "ed25519_signature": "c2ln",
                 "minimum_os_version": "13.0"
             }
         ]
@@ -78,6 +80,7 @@ fn deserializes_manifest_with_flat_assets_and_unknown_fields() {
     .unwrap();
     assert_eq!(picked.size, Some(1234));
     assert_eq!(picked.sha256.as_deref(), Some("ABCDEF"));
+    assert_eq!(picked.ed25519_signature.as_deref(), Some("c2ln"));
     assert!(
         select_asset(
             &manifest.assets,

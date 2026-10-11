@@ -202,6 +202,7 @@ impl UpdateSource for GitHubSource {
             signature: None,
             signature_url: self.signature_for(release, &main.name),
             sha256,
+            ed25519_signature: None,
             deltas,
         })
     }
@@ -259,6 +260,7 @@ impl GitHubSource {
                     checksums_url,
                     signature: None,
                     signature_url: self.signature_for(release, &a.name),
+                    ed25519_signature: None,
                 })
             })
             .collect()

@@ -178,23 +178,21 @@ impl Fixture {
             checksums_url: None,
             signature: None,
             signature_url: None,
+            ed25519_signature: None,
         }
     }
 
     fn release(&self, version: &str, deltas: Vec<DeltaAsset>) -> Release {
-        Release {
-            version: v(version),
-            notes: None,
-            asset: Asset {
-                name: "Demo.dmg".into(),
-                url: format!("{}/full", self.server.base),
-                size: full().len() as u64,
-            },
-            signature: None,
-            signature_url: None,
-            sha256: Some(self.full_sha.clone()),
-            deltas,
-        }
+        Release::new(
+            v(version),
+            Asset::new(
+                "Demo.dmg",
+                format!("{}/full", self.server.base),
+                full().len() as u64,
+            ),
+        )
+        .with_sha256(self.full_sha.clone())
+        .with_deltas(deltas)
     }
 
     /// A config without payload checks: the full artifact is not a real

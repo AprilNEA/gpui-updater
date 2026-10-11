@@ -1,7 +1,8 @@
 # gpui-updater
 
-Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases or
-static JSON manifests.
+Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases,
+static JSON manifests, or [Sparkle] appcasts — and, on macOS, optionally driven
+by Sparkle itself.
 
 GPUI ships no updater of its own, and Zed's `auto_update` crate is GPL-licensed
 and wired to Zed's private update server. `gpui-updater` is an independent,
@@ -15,10 +16,12 @@ apps).
 - **Sources** — `GitHubSource` reads a repo's Releases (latest or pre-releases),
   picks the asset for the running platform, and resolves a `SHA256SUMS`
   checksum and an optional `.minisig` signature. `StaticManifestSource` reads a
-  CDN/S3/R2-friendly `latest.json` with a flat asset list. Bring your own by
-  implementing `UpdateSource`.
-- **Verification** — the published size, SHA-256, and optional [minisign]
-  (Ed25519) signature, with key rotation and signatures bound to a version. On
+  CDN/S3/R2-friendly `latest.json` with a flat asset list. `AppcastSource`
+  reads a Sparkle / WinSparkle appcast. Bring your own by implementing
+  `UpdateSource`.
+- **Verification** — the published size, SHA-256, and optional [minisign] or
+  Sparkle-compatible Ed25519 (`sparkle:edSignature` / `SUPublicEDKey`)
+  signatures, with minisign key rotation and signatures bound to a version. On
   macOS the new `.app` must declare the release version and carry the
   installed app's code-signing team. Static manifests can be signed and expire,
   so a stale one cannot be replayed. Transport security alone is not trusted.
@@ -42,42 +45,84 @@ apps).
   runs the work on the background executor and sets `App::set_restart_path` when
   an update is staged. No background polling: trigger checks explicitly, which
   suits a privacy-conscious "Check for updates" button.
+- **Sparkle driver** (`gpui-updater-sparkle`) — hands the whole flow on macOS
+  to Sparkle 2 (installs for standard users, installs on quit, delta updates,
+  Sparkle's UI) behind the same `Entity<Updater>` and `UpdateStatus`.
 
 ## Installation
 
-The breaking **0.1.0** line separates the blocking engine from two independent
-GPUI adapters. Pick the adapter matching your application's GPUI package:
+Since **0.1.0** the blocking engine is separate from two independent GPUI
+adapters. **0.2.0** adds Sparkle appcasts, Ed25519 verification, and the
+Sparkle driver, with a few breaking changes (see
+[Migrating from 0.1](#migrating-from-01)). Pick the adapter matching your
+application's GPUI package:
 
 | Package | Backend | Rust requirement |
 | --- | --- | --- |
 | `gpui-updater-core` | None (blocking I/O engine) | 1.85; tested on 1.85.0 |
 | `gpui-updater` | Registry `gpui` `^0.2.2` | 1.98; tested on 1.98.1 |
 | `gpui-updater-pre` | Registry `gpui-pre` `^0.3.4` | 1.98; tested on 1.98.1 |
+| `gpui-updater-sparkle` | Sparkle 2 on macOS (loaded at run time); add it next to an adapter | 1.85; tested on 1.85.0 |
 
 Adapter requirements are conservative tested support floors, not a claim that
 older compilers necessarily fail. They do not raise the core's requirement.
-Registry dependencies for the 0.1 releases:
+Registry dependencies for the 0.2 releases:
 
 ```toml
 [dependencies]
 # Core only (blocking engine, no GPUI):
-gpui-updater-core = "0.1"
+gpui-updater-core = "0.2"
 
 # OR official GPUI (Entity<Updater>):
 gpui = "0.2.2"
-gpui-updater = "0.1"
+gpui-updater = "0.2"
 
 # OR gpui-pre (keep existing gpui_updater imports via an alias):
 gpui = { package = "gpui-pre", version = "0.3.4" }
-gpui-updater = { package = "gpui-updater-pre", version = "0.1" }
+gpui-updater = { package = "gpui-updater-pre", version = "0.2" }
+
+# Optional, next to either adapter: hand the macOS flow to Sparkle 2.
+gpui-updater-sparkle = "0.2"
 ```
 
-These are alternatives, not dependencies to combine. Both adapters re-export
+The core and the two adapters are alternatives, not dependencies to combine;
+`gpui-updater-sparkle` is additive. Both adapters re-export
 the entire core API, including `EngineConfig`, `Verification`, `Version`,
 `StaticManifestSource`, `Release`, `Installed`, `UpdateStatus`, and `UpdateEngine`.
 Only the adapters export `Updater`. Without the alias, pre imports use
 `gpui_updater_pre`. Before a release is published, use the corresponding
 `crates/<package>` path from this checkout.
+
+### Migrating from 0.2
+
+- `EngineConfig::minisign_public_key` (the field) became
+  `minisign_public_keys: Vec<String>`. The builder method of the same name is
+  unchanged and may be called more than once to trust several keys.
+- On macOS, downloads are now checked before install: the `.app` must declare
+  the release version, and when the installed app is signed by a team, the
+  update must be validly signed by the same team. Opt out with
+  `.bundle_version(BundleVersion::Ignore)` or `.code_signing(CodeSigning::Off)`.
+- A download is cut off once it exceeds the size the release publishes
+  (GitHub always publishes one).
+- `Release` gains `deltas` (build it with `Release::new` / `with_deltas`), and
+  `Error` gains `Payload`, `ManifestExpired`, and `Delta`.
+
+### Migrating from 0.1
+
+- `Release`, `Asset`, and `EngineConfig` are `#[non_exhaustive]`. Build them
+  with `Release::new` / `Asset::new` / `EngineConfig::new` and the `with_*` or
+  builder methods; the fields stay public for reading and adjusting.
+  `EngineConfig` also gains `ed25519_public_key`.
+- Adapters: `Updater::restart` takes `&mut self`. It needs `Context<Self>`, so
+  it is called from `update` closures and call sites are unchanged.
+- Adapters: `Updater` is no longer `Send` or `Sync`, because it may hold a
+  main-thread-only driver such as `SparkleDriver`. `Entity<Updater>` is still
+  `Send + Sync`; only code that moves an `Updater` value itself across threads
+  is affected.
+- `Verification::Signature` and `Strict` also accept a valid Sparkle Ed25519
+  signature once `ed25519_public_key` is set. With only a minisign key
+  configured, verification behaves as before.
+- Then apply [Migrating from 0.2](#migrating-from-02).
 
 ### Migrating from 0.0.x
 
@@ -88,6 +133,7 @@ Only the adapters export `Updater`. Without the alias, pre imports use
   `restart` retain their behavior. No update policy or polling is added.
 - The adapters depend only on core, never each other. Small GPUI bindings are
   intentionally duplicated; download, verification, and install code are not.
+- Then apply [Migrating from 0.1](#migrating-from-01).
 
 Published adapters contain no baked-in Zed Git dependency. A consumer using a
 Git GPUI must patch **at its workspace root** so every dependency uses that
@@ -119,6 +165,7 @@ release service:
 | --- | --- | --- |
 | `GitHubSource` | Existing GitHub Releases pipelines | Calls the GitHub Releases API, selects a matching asset, and can read `SHA256SUMS` / `.minisig` assets. |
 | `StaticManifestSource` | Cloudflare R2, S3, MinIO, B2, CDNs, static hosting | Fetches a static `latest.json`, selects an asset from `assets[]`, then downloads the asset URL directly. |
+| `AppcastSource` | Apps that publish (or want to publish) a Sparkle appcast | Fetches an appcast, picks the newest applicable `<item>` and the enclosure for this platform, and carries its `sparkle:edSignature`. |
 
 ### GitHub Releases
 
@@ -211,10 +258,12 @@ https://dl.example.com/
 }
 ```
 
-`size`, `sha256`, `signature` (inline minisign signature), and
-`signature_url` (detached signature file) are checked after download as
-described in [Verification and trust](#verification-and-trust). `expires`
-only matters for a signed manifest; see there too.
+`size`, `sha256`, `signature` (inline minisign signature), `signature_url`
+(detached signature file), and `ed25519_signature` (base64, as Sparkle's
+`sign_update` prints it) are checked after download as described in
+[Verification and trust](#verification-and-trust). If both `signature` and
+`signature_url` are present, the inline signature is used. `expires` only
+matters for a signed manifest; see there too.
 
 Asset selection is explicit when you use `os`, `arch`, and `format`:
 
@@ -253,15 +302,19 @@ checks, in this order:
    always does), a response announcing another size is rejected and a body
    growing past it is cut off, so a hostile mirror cannot fill the disk.
 2. **SHA-256** against the inline `sha256` or the release's checksums file.
-3. **minisign signature** (inline `signature`, else `signature_url`), made by
-   any configured public key.
+3. **Signatures.** A minisign signature (inline `signature`, else
+   `signature_url`) made by any configured public key, and a Sparkle-style
+   Ed25519 signature (`ed25519_signature`) checked against
+   `ed25519_public_key`. Every signature that is published *and* has a
+   configured key is verified; any mismatch fails the download.
 4. **Signed version.** If the signature's trusted comment contains
    `version:<semver>`, it must equal the version the file is supposed to be:
    the release version, or for a delta the version it produces. Sign with
    `minisign -S -m App.dmg -t "version:1.2.3"`. This stops an older, validly
    signed artifact from being served as a newer release.
    `VersionBinding::Required` also rejects signatures without the token, once
-   all your releases carry it.
+   all your releases carry it. Ed25519 signatures cover the file alone and
+   cannot name a version; on macOS check 5 covers them.
 5. **App bundle (macOS).** The `.app` in the update must declare the release
    version as `CFBundleShortVersionString` (`BundleVersion::MustMatch`, where
    `1.2` matches `1.2.0`). When the installed app is signed by a team, the
@@ -289,7 +342,7 @@ EngineConfig::new(current_version)
 | `BestEffort` (default) | Verify what's available; skip missing checks (fails open). |
 | `Off` | Skip all checks, including the bundle checks (tests/local dev only). |
 | `Checksum` | Require a matching SHA-256. |
-| `Signature` | Require a public key **and** an advertised minisign signature. |
+| `Signature` | Require a public key **and** an advertised signature it can check (minisign or Ed25519). |
 | `Strict` | Require both a valid signature and a matching SHA-256. |
 
 Under `Signature`/`Strict`, a release that cannot be verified is rejected at
@@ -433,7 +486,11 @@ In a static manifest, list deltas on the asset they rebuild:
 `from` and `url` are required. `to` defaults to the manifest's `version`; set
 it to list deltas between earlier releases for chaining. `format` defaults to
 `files-bsdiff-v1`. A delta in an unknown format is ignored, so newer formats
-can be published next to older ones.
+can be published next to older ones. Deltas take the same `sha256`,
+`signature`, `signature_url`, and `ed25519_signature` fields as assets, and
+the same policy applies: under `Strict`, a delta without a checksum and a
+signature you can check is skipped in favour of the full download.
+`AppcastSource` lists no deltas, so appcast feeds always get the full archive.
 
 Measured on [OpenLogi] macOS arm64 releases (19.7 MB `.dmg`, 51.4 MB unpacked):
 
@@ -450,6 +507,44 @@ Generating a delta took about 18 s with 4 worker threads and a peak of about
 installed result was identical to the full 0.8.13 bundle, and
 `codesign --verify --deep --strict` and Gatekeeper (`spctl`, "Notarized
 Developer ID") both accepted it.
+
+### Sparkle appcasts
+
+`AppcastSource` reads the RSS feed that [Sparkle] (macOS) and WinSparkle
+(Windows) consume, so one feed can serve a Sparkle-driven macOS build and the
+built-in engine everywhere else:
+
+```rust
+use gpui_updater_core::{AppcastSource, EngineConfig, UpdateEngine, Verification};
+
+let source = AppcastSource::new("https://dl.example.com/appcast.xml")
+    .channel("beta"); // optional: also offer `sparkle:channel` "beta"
+
+let engine = UpdateEngine::new(
+    source,
+    EngineConfig::new(current_version)
+        .ed25519_public_key("pfIShU4dEXqPd5ObYNfDBiQWcXozk7estwzTnF9BamQ=") // SUPublicEDKey
+        .verification(Verification::Signature),
+);
+```
+
+- **Signatures** — the enclosure's `sparkle:edSignature` is verified against
+  `ed25519_public_key`, the same base64 key Sparkle's `generate_keys` prints
+  for `SUPublicEDKey`. Archives signed with Sparkle's `sign_update` or
+  `generate_appcast` verify unchanged (pinned by golden tests).
+- **Versions** — the crate orders by semver, so it compares
+  `sparkle:shortVersionString` (falling back to `sparkle:version`). Pick
+  `.version_field(AppcastVersion::BundleVersion)` if your `CFBundleVersion` is
+  itself a semantic version.
+- **Filters** — `sparkle:channel`, `sparkle:minimumSystemVersion` /
+  `maximumSystemVersion` (macOS), `sparkle:hardwareRequirements` (`arm64`), and
+  `sparkle:informationalUpdate` are honoured. Enclosures are matched on
+  `sparkle:os` (`macos` when absent; WinSparkle's `windows-x64` etc. on
+  Windows; `linux-x64` / `linux-arm64` / `linux` on Linux).
+- **Not supported** — Sparkle's own delta updates (`sparkle:deltas`), phased rollouts, critical updates, and
+  verifying Sparkle 2.10's signed-feed comment; the engine always downloads the
+  full archive. On macOS the engine installs only `.dmg` enclosures (a `.zip`
+  or `.tar.xz` fails with a clear error); Sparkle itself handles all formats.
 
 ### GPUI entity
 
@@ -486,18 +581,56 @@ but does not interrupt an already-running blocking download/install or roll it
 back. A completed download may remain on disk. A check that finds no newer
 release or fails retains the previous `available()` release, as in 0.0.x.
 
+### Sparkle on macOS
+
+`gpui-updater-sparkle` provides `SparkleDriver`, an `UpdateDriver` that hands
+checking, downloading, installing, and relaunching to Sparkle 2. Build the
+entity with `Updater::with_driver` instead of `Updater::new` (both adapters
+have it); views keep using `UpdateStatus` and the same `check` /
+`download_and_install` / `restart` calls.
+
+```rust
+use gpui_updater::{AppcastSource, EngineConfig, Updater};
+use gpui_updater_sparkle::{SparkleDriver, SparkleOptions};
+
+let updater = cx.new(|cx| match SparkleDriver::load(SparkleOptions::new()) {
+    // Running from a bundle that embeds Sparkle.framework.
+    Ok(Some(sparkle)) => Updater::with_driver(sparkle, cx),
+    // `cargo run`, other platforms, or a misconfigured bundle: same feed,
+    // built-in engine.
+    _ => Updater::new(
+        AppcastSource::new(FEED_URL),
+        EngineConfig::new(current_version).ed25519_public_key(SU_PUBLIC_ED_KEY),
+        cx,
+    ),
+});
+```
+
+Sparkle is loaded at run time from `Contents/Frameworks/Sparkle.framework`, so
+`cargo build` and `cargo test` never need it. The bundle must embed and sign
+the framework and set `SUPublicEDKey` and `SUFeedURL` in `Info.plist`; see the
+[crate README](crates/gpui-updater-sparkle/README.md) for the checklist, the
+call mapping, and the end-to-end smoke test. `Updater::driver_mut::<SparkleDriver>()`
+reaches Sparkle's own settings (automatic checks and downloads).
+
 ## Platform notes
 
-- **macOS** replacing an app in `/Applications` needs write permission to it.
+- **macOS** (built-in engine) replacing an app in `/Applications` needs write
+  permission to it.
   An admin who drag-installed the app can replace it without a prompt; a
   standard user cannot. A privilege-escalation fallback (an `osascript … with
   administrator privileges` prompt, as Velopack does) is not yet implemented —
-  a permission error just surfaces as a failed update.
+  a permission error just surfaces as a failed update. Sparkle handles this
+  case with its installer, which is one reason to use `gpui-updater-sparkle`.
 - **Linux and Windows** have no bundle metadata to check, so
   `BundleVersion` and `CodeSigning` only apply on macOS. Sign your artifacts
   and bind signatures to versions there instead.
 - Adapters need their GPUI backend's native toolchain (including Xcode/Metal
   where required on macOS). Core does not need GPUI or a graphics toolchain.
+- **Linux with registry `gpui` 0.2.2**: libc 0.2.190 removed `ENOATTR`, which
+  breaks `xattr` 0.2.3 (pulled in by `gpui_http_client` → `zed-async-tar`). If
+  a fresh lockfile picks that libc, hold it back with
+  `cargo update -p libc --precise 0.2.189`. `gpui-pre` is not affected.
 
 ## Development notes
 
@@ -512,7 +645,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy -p gpui-updater-core --features delta --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-bash scripts/check-packages.sh
+cargo xtask check-packages
 ```
 
 The `delta` feature adds `qbsdiff` and a pure-Rust bzip2 (both only used to
@@ -529,18 +662,22 @@ entity/task lifetime. `gpui-pre` captures the fake platform restart request;
 official 0.2.2 discards its path, so exact-path coverage uses a small isolated
 handoff boundary. No test restarts a real app or installs over the test binary.
 
-`scripts/check-packages.sh` packages all three crates without publishing,
+`cargo xtask check-packages` packages all four crates without publishing,
 checks archive contents, builds fresh consumers from extracted packages, and
-checks the selected normal/build dependency closures (core: no GPUI; official:
-no pre; pre: no official). Package locks may list unrelated platform/optional
-dependencies; they are not evidence that those dependencies are compiled.
+checks the selected normal/build dependency closures (core and Sparkle: no
+GPUI; official: no pre; pre: no official). Package locks may list unrelated
+platform/optional dependencies; they are not evidence that those dependencies
+are compiled. Pass package names to check only those, for example
+`cargo xtask check-packages gpui-updater-core gpui-updater-pre` on a Mac
+without the Metal toolchain.
 
-Release order: publish `gpui-updater-core` 0.1.0 first; after it is available in
-the registry, publish `gpui-updater` and `gpui-updater-pre` 0.1.0. Run normal
-package verification again before publishing. A repository tag is not needed
-for registry resolution; if a coordinated release tag is created, `v0.1.0`
-should identify the reviewed workspace commit, not the old prototype. Never
-rewrite an existing release tag or embed a consumer's GPUI Git pin here.
+Release order: publish `gpui-updater-core` 0.2.0 first; after it is available in
+the registry, publish `gpui-updater`, `gpui-updater-pre` and
+`gpui-updater-sparkle` 0.2.0. Run normal package verification again before
+publishing. A repository tag is not needed for registry resolution; if a
+coordinated release tag is created, `v0.2.0` should identify the published
+workspace commit. Never rewrite an existing release tag or embed a consumer's
+GPUI Git pin here.
 
 On macOS inside some Nix shells, Cargo may pick Nix's clang wrapper as `cc` and
 fail to link build scripts with missing system symbols such as `__Unwind_*` or
@@ -564,3 +701,4 @@ at your option.
 [GPUI]: https://www.gpui.rs/
 [minisign]: https://jedisct1.github.io/minisign/
 [OpenLogi]: https://github.com/AprilNEA/OpenLogi
+[Sparkle]: https://sparkle-project.org

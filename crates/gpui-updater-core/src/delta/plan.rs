@@ -172,6 +172,7 @@ mod tests {
             checksums_url: None,
             signature: None,
             signature_url: None,
+            ed25519_signature: None,
         }
     }
 

@@ -26,6 +26,7 @@ pub(crate) fn with_app<T>(artifact: &Path, f: impl FnOnce(&Path) -> Result<T>) -
     if artifact.is_dir() {
         return f(&find_app(artifact)?);
     }
+    ensure_disk_image(artifact)?;
     let mount = Mount::attach(artifact)?;
     f(&find_app(&mount.dir)?)
 }
@@ -71,6 +72,25 @@ fn swap_in(new_app: &Path, app_root: &Path) -> Result<Installed> {
     Ok(Installed {
         restart_path: Some(app_root.to_path_buf()),
     })
+}
+
+/// Only disk images are installable on macOS. Sparkle appcasts often ship
+/// `.zip` or `.tar.xz` archives instead; reject those up front with a clear
+/// message rather than letting `hdiutil` fail on them.
+fn ensure_disk_image(artifact: &Path) -> Result<()> {
+    if artifact
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("dmg"))
+    {
+        return Ok(());
+    }
+    Err(Error::Install(format!(
+        "cannot install `{}` on macOS: only .dmg disk images are supported",
+        artifact.file_name().map_or_else(
+            || artifact.display().to_string(),
+            |n| n.to_string_lossy().into_owned()
+        )
+    )))
 }
 
 /// A mounted DMG that detaches itself (and removes its mount point) on drop.
@@ -150,6 +170,7 @@ fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{bundle_root, install, unique_temp_dir};
+    use crate::error::Error;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -217,5 +238,16 @@ mod tests {
         assert!(!work.join("Applications/.Demo.app.old").exists());
 
         let _ = fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn rejects_archives_that_are_not_disk_images() {
+        let target = Path::new("/nonexistent/App.app");
+        for artifact in ["/tmp/App-1.0.zip", "/tmp/App-1.0.tar.xz", "/tmp/App"] {
+            match install(Path::new(artifact), target) {
+                Err(Error::Install(message)) => assert!(message.contains(".dmg"), "{message}"),
+                other => panic!("{artifact}: expected an install error, got {other:?}"),
+            }
+        }
     }
 }

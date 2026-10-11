@@ -28,6 +28,11 @@ use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, p
 /// Required manifest fields are `version` and `assets`; required asset fields
 /// are `name` and `url`.
 ///
+/// An asset may carry a minisign `signature` / `signature_url`, a `sha256`, and
+/// an `ed25519_signature` (base64, in the format Sparkle's `sign_update`
+/// prints), so one release pipeline can sign for this manifest and a Sparkle
+/// appcast with the same key.
+///
 /// An asset can also carry `deltas`: binary deltas that rebuild it from an
 /// older installed version (see the `delta` feature). Each needs `from` and
 /// `url`; `name`, `format` (default `files-bsdiff-v1`), `size`, `sha256`,
@@ -192,6 +197,10 @@ impl UpdateSource for StaticManifestSource {
             signature: main.signature.clone().filter(|s| !s.trim().is_empty()),
             signature_url: main.signature_url.clone().filter(|s| !s.trim().is_empty()),
             sha256: main.sha256.as_ref().map(|s| s.trim().to_ascii_lowercase()),
+            ed25519_signature: main
+                .ed25519_signature
+                .clone()
+                .filter(|s| !s.trim().is_empty()),
             deltas,
         })
     }
@@ -243,6 +252,7 @@ fn delta_asset(delta: &ManifestDelta, version: &Version) -> Option<DeltaAsset> {
         checksums_url: None,
         signature: non_empty(&delta.signature),
         signature_url: non_empty(&delta.signature_url),
+        ed25519_signature: non_empty(&delta.ed25519_signature),
     })
 }
 
@@ -334,6 +344,8 @@ struct ManifestAsset {
     #[serde(default)]
     signature_url: Option<String>,
     #[serde(default)]
+    ed25519_signature: Option<String>,
+    #[serde(default)]
     os: Option<String>,
     #[serde(default)]
     arch: Option<String>,
@@ -363,6 +375,8 @@ struct ManifestDelta {
     signature: Option<String>,
     #[serde(default)]
     signature_url: Option<String>,
+    #[serde(default)]
+    ed25519_signature: Option<String>,
 }
 
 #[cfg(test)]

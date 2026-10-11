@@ -14,6 +14,12 @@ pub const DEFAULT_MAX_DELTA_HOPS: usize = 4;
 /// How strictly [`UpdateEngine`](crate::UpdateEngine) enforces integrity and
 /// authenticity checks on a release.
 ///
+/// A "signature" is either a minisign signature (checked against
+/// [`EngineConfig::minisign_public_key`]) or a Sparkle-style Ed25519
+/// signature (checked against [`EngineConfig::ed25519_public_key`]). Every
+/// signature the release publishes *and* a configured key can check is
+/// verified, and any mismatch fails the download. The same applies to deltas.
+///
 /// The default, [`BestEffort`](Verification::BestEffort), verifies whatever the
 /// release provides and *skips* a check when its input is absent — so an
 /// unsigned release installs with only a checksum, or with nothing. The
@@ -35,11 +41,11 @@ pub enum Verification {
     /// Require a matching SHA-256. Fails closed when the release publishes no
     /// checksum. A signature is still verified when one is available.
     Checksum,
-    /// Require a valid minisign signature: a public key must be configured and
-    /// the release must publish a signature. A checksum is still verified when
-    /// available, but is not itself required.
+    /// Require a valid signature: the release must publish a minisign or
+    /// Ed25519 signature for which a public key is configured. A checksum is
+    /// still verified when available, but is not itself required.
     Signature,
-    /// Require both a valid minisign signature and a matching SHA-256.
+    /// Require both a valid signature and a matching SHA-256.
     Strict,
 }
 
@@ -64,6 +70,9 @@ impl Verification {
 /// checks it against the version the file is supposed to be: the release
 /// version for a full artifact, the target version for a delta. That stops an
 /// older, validly signed artifact from being served as a newer one.
+///
+/// Sparkle-style Ed25519 signatures sign the file alone and cannot name a
+/// version; on macOS, [`BundleVersion`] covers them instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum VersionBinding {
@@ -114,6 +123,11 @@ pub struct EngineConfig {
     /// accepted, so a new key can ship next to the old one before releases
     /// switch to it.
     pub minisign_public_keys: Vec<String>,
+    /// Base64 Ed25519 public key in Sparkle's format (the `SUPublicEDKey`
+    /// value printed by Sparkle's `generate_keys`). When set and the release
+    /// publishes an [`ed25519_signature`](Release::ed25519_signature), the
+    /// download is signature-checked.
+    pub ed25519_public_key: Option<String>,
     /// How strictly downloads are verified. See [`Verification`].
     pub verification: Verification,
     /// Whether signatures must name the version they were made for.
@@ -141,6 +155,7 @@ impl EngineConfig {
         Self {
             current_version,
             minisign_public_keys: Vec::new(),
+            ed25519_public_key: None,
             verification: Verification::default(),
             version_binding: VersionBinding::default(),
             code_signing: CodeSigning::default(),
@@ -157,6 +172,14 @@ impl EngineConfig {
     #[must_use]
     pub fn minisign_public_key(mut self, key: impl Into<String>) -> Self {
         self.minisign_public_keys.push(key.into());
+        self
+    }
+
+    /// Set the base64 Ed25519 public key (Sparkle's `SUPublicEDKey`) used to
+    /// verify `sparkle:edSignature` signatures.
+    #[must_use]
+    pub fn ed25519_public_key(mut self, key: impl Into<String>) -> Self {
+        self.ed25519_public_key = Some(key.into());
         self
     }
 
@@ -237,17 +260,16 @@ impl EngineConfig {
     /// [`precheck`](Self::precheck) for any downloadable file's metadata.
     pub(super) fn precheck_integrity(&self, file: Integrity<'_>) -> Result<()> {
         let what = file.what;
-        if self.verification.requires_signature() {
-            if self.minisign_public_keys.is_empty() {
+        if self.verification.requires_signature() && !self.can_verify_signature_of(file) {
+            if self.minisign_public_keys.is_empty() && self.ed25519_public_key.is_none() {
                 return Err(Error::VerificationRequired(
-                    "policy requires a minisign signature, but no public key is configured".into(),
+                    "policy requires a signature, but no minisign or Ed25519 public key is configured"
+                        .into(),
                 ));
             }
-            if !file.has_signature() {
-                return Err(Error::VerificationRequired(format!(
-                    "policy requires a minisign signature, but the {what} publishes none"
-                )));
-            }
+            return Err(Error::VerificationRequired(format!(
+                "policy requires a signature, but the {what} publishes none that a configured key can verify"
+            )));
         }
         if self.verification.requires_checksum() && !file.has_checksum() {
             return Err(Error::VerificationRequired(format!(
@@ -255,6 +277,15 @@ impl EngineConfig {
             )));
         }
         Ok(())
+    }
+
+    /// Whether at least one signature the file advertises has a matching
+    /// configured key.
+    fn can_verify_signature_of(&self, file: Integrity<'_>) -> bool {
+        let minisign = !self.minisign_public_keys.is_empty() && file.has_minisign();
+        let ed25519 =
+            self.ed25519_public_key.is_some() && non_empty(file.ed25519_signature).is_some();
+        minisign || ed25519
     }
 
     /// Verify a downloaded file under the configured policy. `version` is
@@ -285,28 +316,35 @@ impl EngineConfig {
             }
             None => {}
         }
-        if self.minisign_public_keys.is_empty() {
-            return Ok(());
+        let mut verified_signature = false;
+        if let (Some(key), Some(signature)) =
+            (&self.ed25519_public_key, non_empty(file.ed25519_signature))
+        {
+            verify::verify_ed25519(path, key, signature)?;
+            verified_signature = true;
         }
-        let Some(signature) = resolve_signature(file)? else {
-            // `precheck` already accepted a non-empty `signature_url`, but the
-            // fetched body turned out blank. Fail closed instead of relying on
-            // the verifier to reject an empty signature string.
-            if policy.requires_signature() {
-                return Err(Error::VerificationRequired(
-                    "policy requires a minisign signature, but the published signature is empty"
-                        .into(),
-                ));
+        if !self.minisign_public_keys.is_empty() {
+            if let Some(signature) = resolve_minisign(file)? {
+                let keys: Vec<&str> = self
+                    .minisign_public_keys
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                let comment =
+                    verify::verify_minisign_bytes(&std::fs::read(path)?, &keys, &signature)?;
+                self.check_signed_version(&comment, version)?;
+                verified_signature = true;
             }
-            return Ok(());
-        };
-        let keys: Vec<&str> = self
-            .minisign_public_keys
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let comment = verify::verify_minisign_bytes(&std::fs::read(path)?, &keys, &signature)?;
-        self.check_signed_version(&comment, version)
+        }
+        // `precheck` may have accepted a non-empty `signature_url` whose fetched
+        // body turned out blank. Fail closed instead of relying on a verifier to
+        // reject an empty signature string.
+        if policy.requires_signature() && !verified_signature {
+            return Err(Error::VerificationRequired(
+                "policy requires a signature, but the published signature is empty".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn check_signed_version(&self, trusted_comment: &str, expected: &Version) -> Result<()> {
@@ -341,6 +379,7 @@ pub(super) struct Integrity<'a> {
     checksums_url: Option<&'a str>,
     signature: Option<&'a str>,
     signature_url: Option<&'a str>,
+    ed25519_signature: Option<&'a str>,
 }
 
 impl<'a> Integrity<'a> {
@@ -352,11 +391,12 @@ impl<'a> Integrity<'a> {
             checksums_url: None,
             signature: release.signature.as_deref(),
             signature_url: release.signature_url.as_deref(),
+            ed25519_signature: release.ed25519_signature.as_deref(),
         }
     }
 
     #[cfg_attr(
-        not(feature = "delta"),
+        all(not(feature = "delta"), not(test)),
         expect(dead_code, reason = "only deltas are verified this way")
     )]
     pub(super) fn of_delta(delta: &'a DeltaAsset) -> Self {
@@ -367,11 +407,12 @@ impl<'a> Integrity<'a> {
             checksums_url: delta.checksums_url.as_deref(),
             signature: delta.signature.as_deref(),
             signature_url: delta.signature_url.as_deref(),
+            ed25519_signature: delta.ed25519_signature.as_deref(),
         }
     }
 
     /// Whether a minisign signature is advertised, inline or by URL.
-    fn has_signature(self) -> bool {
+    fn has_minisign(self) -> bool {
         non_empty(self.signature).is_some() || non_empty(self.signature_url).is_some()
     }
 
@@ -404,7 +445,7 @@ fn resolve_checksum(file: Integrity<'_>) -> Result<Option<String>> {
 /// The minisign signature for a file: the inline value if present, otherwise
 /// fetched from `signature_url`. `None` when the release advertises neither,
 /// or when a fetched signature body is blank.
-fn resolve_signature(file: Integrity<'_>) -> Result<Option<String>> {
+fn resolve_minisign(file: Integrity<'_>) -> Result<Option<String>> {
     if let Some(signature) = non_empty(file.signature) {
         return Ok(Some(signature.to_string()));
     }

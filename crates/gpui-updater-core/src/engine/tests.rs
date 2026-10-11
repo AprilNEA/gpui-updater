@@ -5,19 +5,18 @@ use crate::error::Error;
 use crate::release::Asset;
 
 fn release(sha256: Option<&str>, signature: Option<&str>, signature_url: Option<&str>) -> Release {
-    Release {
-        version: Version::new(1, 0, 0),
-        notes: None,
-        asset: Asset {
-            name: "app.dmg".to_string(),
-            url: "https://example.test/app.dmg".to_string(),
-            size: 0,
-        },
-        signature: signature.map(str::to_string),
-        signature_url: signature_url.map(str::to_string),
-        sha256: sha256.map(str::to_string),
-        deltas: Vec::new(),
-    }
+    let mut release = Release::new(
+        Version::new(1, 0, 0),
+        Asset::new("app.dmg", "https://example.test/app.dmg", 0),
+    );
+    release.signature = signature.map(str::to_string);
+    release.signature_url = signature_url.map(str::to_string);
+    release.sha256 = sha256.map(str::to_string);
+    release
+}
+
+fn ed25519_release(signature: &str) -> Release {
+    release(None, None, None).with_ed25519_signature(signature)
 }
 
 fn config(verification: Verification, key: Option<&str>) -> EngineConfig {
@@ -234,6 +233,71 @@ fn rejects_a_tampered_trusted_comment() {
     assert!(matches!(
         verify_signed(&cfg, &forged, "1.3.0"),
         Err(Error::Signature(_))
+    ));
+}
+
+#[test]
+fn signature_policy_accepts_an_ed25519_signature_with_its_key() {
+    let cfg = config(Verification::Signature, None).ed25519_public_key("edkey");
+    assert!(cfg.precheck(&ed25519_release("edsig")).is_ok());
+    // A blank Ed25519 signature counts as absent.
+    assert!(matches!(
+        cfg.precheck(&ed25519_release("  ")),
+        Err(Error::VerificationRequired(_))
+    ));
+}
+
+#[test]
+fn signature_policy_needs_a_key_for_the_published_signature_kind() {
+    // Only a minisign key, but the release is signed with Ed25519 alone.
+    let cfg = config(Verification::Signature, Some("pubkey"));
+    assert!(matches!(
+        cfg.precheck(&ed25519_release("edsig")),
+        Err(Error::VerificationRequired(_))
+    ));
+    // Only an Ed25519 key, but the release is signed with minisign alone.
+    let cfg = config(Verification::Signature, None).ed25519_public_key("edkey");
+    assert!(matches!(
+        cfg.precheck(&release(None, Some("sig"), None)),
+        Err(Error::VerificationRequired(_))
+    ));
+}
+
+#[test]
+fn verifies_ed25519_signed_artifacts_and_rejects_tampering() {
+    let fixture = crate::verify::test_support::Ed25519Fixture::new(b"update payload");
+    let cfg = config(Verification::Signature, None).ed25519_public_key(&fixture.public_key);
+    let signed = ed25519_release(&fixture.signature);
+    let verify = |cfg: &EngineConfig| {
+        cfg.verify_file(
+            &fixture.path,
+            Integrity::of_release(&signed),
+            &signed.version,
+        )
+    };
+    assert!(verify(&cfg).is_ok());
+
+    std::fs::write(&fixture.path, b"update payloaD").unwrap();
+    assert!(matches!(verify(&cfg), Err(Error::Signature(_))));
+}
+
+#[test]
+fn ed25519_satisfies_strict_deltas_too() {
+    // A delta signed only with Ed25519 passes the signature gate when the
+    // Ed25519 key is configured, and fails it when only minisign is.
+    let mut delta = crate::release::DeltaAsset::new(
+        Version::new(0, 1, 0),
+        Version::new(1, 0, 0),
+        Asset::new("app.dmg.from-0.1.0.delta", "https://example.test/d", 0),
+    );
+    delta.sha256 = Some("ab".into());
+    delta.ed25519_signature = Some("edsig".into());
+    let ed = config(Verification::Strict, None).ed25519_public_key("edkey");
+    assert!(ed.precheck_integrity(Integrity::of_delta(&delta)).is_ok());
+    let minisign_only = config(Verification::Strict, Some("pubkey"));
+    assert!(matches!(
+        minisign_only.precheck_integrity(Integrity::of_delta(&delta)),
+        Err(Error::VerificationRequired(_))
     ));
 }
 
