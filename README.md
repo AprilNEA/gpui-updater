@@ -393,6 +393,10 @@ reaches Sparkle's own settings (automatic checks and downloads).
   case with its installer, which is one reason to use `gpui-updater-sparkle`.
 - Adapters need their GPUI backend's native toolchain (including Xcode/Metal
   where required on macOS). Core does not need GPUI or a graphics toolchain.
+- **Linux with registry `gpui` 0.2.2**: libc 0.2.190 removed `ENOATTR`, which
+  breaks `xattr` 0.2.3 (pulled in by `gpui_http_client` → `zed-async-tar`). If
+  a fresh lockfile picks that libc, hold it back with
+  `cargo update -p libc --precise 0.2.189`. `gpui-pre` is not affected.
 
 ## Development notes
 

@@ -76,6 +76,21 @@ pub fn create(cx: &mut gpui::App) -> gpui::Entity<updater::Updater> {
 }
 RS
     fi
+    # libc 0.2.190 removed Linux `ENOATTR` (deprecated since 0.2.55), which breaks
+    # xattr 0.2.3; registry gpui 0.2.2 pulls that in via gpui_http_client ->
+    # zed-async-tar. A fresh resolve picks the newest libc, so hold it at 0.2.189
+    # while xattr 0.2 is in the graph. This stops applying on its own once GPUI's
+    # dependency chain moves past xattr 0.2.
+    cargo generate-lockfile --manifest-path "$consumer/Cargo.toml"
+    if python3 - "$consumer/Cargo.lock" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as file:
+    packages = tomllib.load(file)["package"]
+sys.exit(0 if any(p["name"] == "xattr" and p["version"].startswith("0.2.") for p in packages) else 1)
+PY
+    then
+        cargo update --manifest-path "$consumer/Cargo.toml" -p libc --precise 0.2.189
+    fi
     cargo build --manifest-path "$consumer/Cargo.toml"
     cargo tree --manifest-path "$consumer/Cargo.toml" -e normal,build --prefix none --format '{p}' > "$consumer/tree"
     python3 - "$package" "$consumer/tree" <<'PY'
