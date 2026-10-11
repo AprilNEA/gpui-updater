@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn explicit_format_replaces_default_extension_matcher() {
         let source = StaticManifestSource::new("https://dl.example.com/latest.json").format("dmg");
-        assert!(source.asset_patterns.is_empty());
+        assert_eq!(source.asset_patterns, Vec::<String>::new());
         assert_eq!(source.format.as_deref(), Some("dmg"));
     }
 
