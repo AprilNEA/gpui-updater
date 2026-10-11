@@ -22,6 +22,11 @@ use crate::release::{Asset, Release, parse_tag};
 /// Required manifest fields are `version` and `assets`; required asset fields
 /// are `name` and `url`.
 ///
+/// An asset may carry a minisign `signature` / `signature_url`, a `sha256`, and
+/// an `ed25519_signature` (base64, in the format Sparkle's `sign_update`
+/// prints), so one release pipeline can sign for this manifest and a Sparkle
+/// appcast with the same key.
+///
 /// ```no_run
 /// use gpui_updater_core::StaticManifestSource;
 ///
@@ -140,6 +145,10 @@ impl UpdateSource for StaticManifestSource {
             signature: main.signature.clone().filter(|s| !s.trim().is_empty()),
             signature_url: main.signature_url.clone().filter(|s| !s.trim().is_empty()),
             sha256: main.sha256.as_ref().map(|s| s.trim().to_ascii_lowercase()),
+            ed25519_signature: main
+                .ed25519_signature
+                .clone()
+                .filter(|s| !s.trim().is_empty()),
         })
     }
 }
@@ -220,6 +229,8 @@ struct ManifestAsset {
     #[serde(default)]
     signature_url: Option<String>,
     #[serde(default)]
+    ed25519_signature: Option<String>,
+    #[serde(default)]
     os: Option<String>,
     #[serde(default)]
     arch: Option<String>,
@@ -244,6 +255,7 @@ mod tests {
             sha256: None,
             signature: None,
             signature_url: None,
+            ed25519_signature: None,
             os: Some("macos".to_string()),
             arch: Some("arm64".to_string()),
             format: Some("dmg".to_string()),
@@ -287,6 +299,7 @@ mod tests {
                     "size": 1234,
                     "sha256": "ABCDEF",
                     "signature": "trusted comment: sig",
+                    "ed25519_signature": "c2ln",
                     "minimum_os_version": "13.0"
                 }
             ]
@@ -306,6 +319,7 @@ mod tests {
         .unwrap();
         assert_eq!(picked.size, Some(1234));
         assert_eq!(picked.sha256.as_deref(), Some("ABCDEF"));
+        assert_eq!(picked.ed25519_signature.as_deref(), Some("c2ln"));
         assert!(
             select_asset(
                 &manifest.assets,
@@ -323,7 +337,7 @@ mod tests {
     #[test]
     fn explicit_format_replaces_default_extension_matcher() {
         let source = StaticManifestSource::new("https://dl.example.com/latest.json").format("dmg");
-        assert!(source.asset_patterns.is_empty());
+        assert_eq!(source.asset_patterns, Vec::<String>::new());
         assert_eq!(source.format.as_deref(), Some("dmg"));
     }
 

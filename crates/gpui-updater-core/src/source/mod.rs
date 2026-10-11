@@ -1,12 +1,15 @@
 //! Where to look for releases.
 //!
 //! A [`UpdateSource`] knows how to fetch the latest release metadata. The
-//! crate ships [`GitHubSource`] and [`StaticManifestSource`]; implement the
-//! trait yourself to read from a self-hosted endpoint, GitLab, etc.
+//! crate ships [`GitHubSource`], [`StaticManifestSource`], and
+//! [`AppcastSource`] (Sparkle / WinSparkle appcasts); implement the trait
+//! yourself to read from a self-hosted endpoint, GitLab, etc.
 
+mod appcast;
 mod github;
 mod manifest;
 
+pub use appcast::{AppcastSource, AppcastVersion};
 pub use github::GitHubSource;
 pub use manifest::StaticManifestSource;
 

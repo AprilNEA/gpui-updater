@@ -5,7 +5,12 @@ use semver::Version;
 use crate::error::{Error, Result};
 
 /// A downloadable file attached to a release.
+///
+/// Marked `#[non_exhaustive]`: build one with [`Asset::new`] so new fields can
+/// be added without breaking custom [`UpdateSource`](crate::UpdateSource)
+/// implementations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Asset {
     /// File name as published (e.g. `OpenLogi-v0.2.0-macos.dmg`).
     pub name: String,
@@ -15,8 +20,23 @@ pub struct Asset {
     pub size: u64,
 }
 
+impl Asset {
+    /// Describe a downloadable file. Pass `0` for `size` when it is unknown.
+    pub fn new(name: impl Into<String>, url: impl Into<String>, size: u64) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            size,
+        }
+    }
+}
+
 /// The latest applicable release resolved for the running platform.
+///
+/// Marked `#[non_exhaustive]`: build one with [`Release::new`] and the `with_*`
+/// methods. Fields stay public for reading and adjusting.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Release {
     /// Parsed semantic version (the tag with any leading `v` stripped).
     pub version: Version,
@@ -31,6 +51,63 @@ pub struct Release {
     /// Expected lowercase hex SHA-256 of `asset`, when the source could resolve
     /// it (e.g. from a `SHA256SUMS` file).
     pub sha256: Option<String>,
+    /// Base64 Ed25519 signature over the whole `asset` file, in the format of a
+    /// Sparkle appcast's `sparkle:edSignature` (what Sparkle's `sign_update`
+    /// prints). Verified against
+    /// [`EngineConfig::ed25519_public_key`](crate::EngineConfig::ed25519_public_key).
+    pub ed25519_signature: Option<String>,
+}
+
+impl Release {
+    /// A release of `version` that ships `asset`, with no notes, checksum, or
+    /// signatures yet.
+    pub fn new(version: Version, asset: Asset) -> Self {
+        Self {
+            version,
+            notes: None,
+            asset,
+            signature: None,
+            signature_url: None,
+            sha256: None,
+            ed25519_signature: None,
+        }
+    }
+
+    /// Attach release notes (or a link to them).
+    #[must_use]
+    pub fn with_notes(mut self, notes: impl Into<String>) -> Self {
+        self.notes = Some(notes.into());
+        self
+    }
+
+    /// Attach the expected hex SHA-256 of the asset (stored lowercase).
+    #[must_use]
+    pub fn with_sha256(mut self, sha256: impl Into<String>) -> Self {
+        self.sha256 = Some(sha256.into().trim().to_ascii_lowercase());
+        self
+    }
+
+    /// Attach an inline minisign signature (the contents of a `.minisig`).
+    #[must_use]
+    pub fn with_minisign_signature(mut self, signature: impl Into<String>) -> Self {
+        self.signature = Some(signature.into());
+        self
+    }
+
+    /// Attach the URL of a detached minisign signature.
+    #[must_use]
+    pub fn with_minisign_signature_url(mut self, url: impl Into<String>) -> Self {
+        self.signature_url = Some(url.into());
+        self
+    }
+
+    /// Attach a base64 Ed25519 signature in Sparkle's `sparkle:edSignature`
+    /// format.
+    #[must_use]
+    pub fn with_ed25519_signature(mut self, signature: impl Into<String>) -> Self {
+        self.ed25519_signature = Some(signature.into());
+        self
+    }
 }
 
 /// Parse a release tag such as `v1.2.3` or `1.2.3` into a [`Version`].
@@ -43,9 +120,43 @@ pub fn parse_tag(tag: &str) -> Result<Version> {
     Version::parse(stripped).map_err(|e| Error::Parse(format!("tag `{tag}`: {e}")))
 }
 
+/// Parse a version the way feeds that are not strictly semver publish it.
+///
+/// Accepts everything [`parse_tag`] accepts, plus purely numeric versions with
+/// one or two components, which are padded with zeros (`2` → `2.0.0`,
+/// `1.4` → `1.4.0`). Sparkle feeds commonly publish such versions. Anything
+/// else (four components, words, empty strings) is rejected rather than
+/// guessed at, so a malformed feed never compares as an upgrade.
+///
+/// # Errors
+/// Returns [`Error::Parse`] if the string is neither semver nor a 1–3
+/// component numeric version.
+pub fn parse_version_lenient(version: &str) -> Result<Version> {
+    if let Ok(parsed) = parse_tag(version) {
+        return Ok(parsed);
+    }
+    let trimmed = version.trim();
+    let stripped = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let parts: Vec<&str> = stripped.split('.').collect();
+    let numeric = !parts.is_empty()
+        && parts.len() <= 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if !numeric {
+        return Err(Error::Parse(format!("version `{version}` is not semver")));
+    }
+    let mut padded = parts.join(".");
+    for _ in parts.len()..3 {
+        padded.push_str(".0");
+    }
+    Version::parse(&padded).map_err(|e| Error::Parse(format!("version `{version}`: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_tag;
+    use super::{Asset, Release, parse_tag, parse_version_lenient};
+    use semver::Version;
 
     #[test]
     fn parses_v_prefixed_and_bare_tags() {
@@ -58,5 +169,45 @@ mod tests {
     fn rejects_non_semver_tags() {
         assert!(parse_tag("latest").is_err());
         assert!(parse_tag("v1.2").is_err());
+    }
+
+    #[test]
+    fn lenient_parse_pads_short_numeric_versions() {
+        assert_eq!(parse_version_lenient("2").unwrap(), Version::new(2, 0, 0));
+        assert_eq!(
+            parse_version_lenient("v1.4").unwrap(),
+            Version::new(1, 4, 0)
+        );
+        assert_eq!(
+            parse_version_lenient(" 1.2.3 ").unwrap(),
+            Version::new(1, 2, 3)
+        );
+        assert_eq!(
+            parse_version_lenient("0.3.0-beta.2").unwrap().to_string(),
+            "0.3.0-beta.2"
+        );
+    }
+
+    #[test]
+    fn lenient_parse_rejects_what_it_cannot_order() {
+        for bad in ["", "1.2.3.4", "1..2", "build 42", "1.2b", "latest"] {
+            assert!(parse_version_lenient(bad).is_err(), "{bad:?} should fail");
+        }
+    }
+
+    #[test]
+    fn builder_sets_optional_fields() {
+        let release = Release::new(
+            Version::new(1, 0, 0),
+            Asset::new("app.dmg", "https://example.test/app.dmg", 3),
+        )
+        .with_notes("notes")
+        .with_sha256(" ABC ")
+        .with_ed25519_signature("sig");
+        assert_eq!(release.notes.as_deref(), Some("notes"));
+        assert_eq!(release.sha256.as_deref(), Some("abc"));
+        assert_eq!(release.ed25519_signature.as_deref(), Some("sig"));
+        assert!(release.signature.is_none());
+        assert_eq!(release.asset.size, 3);
     }
 }

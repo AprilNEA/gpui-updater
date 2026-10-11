@@ -1,0 +1,68 @@
+[package]
+name = "gpui-updater-sparkle"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Sparkle (macOS) update driver for gpui-updater: hands checking, installing, and relaunching to Sparkle.framework"
+readme = "README.md"
+# The smoke script drives the workspace (fixture feed, example build); it has no
+# use in the published crate.
+exclude = ["scripts/"]
+keywords = ["gpui", "sparkle", "updater", "macos"]
+categories = ["gui", "os::macos-apis"]
+
+[dependencies]
+gpui-updater-core = { version = "0.1.0", path = "../gpui-updater-core" }
+thiserror = "2"
+tracing = "0.1"
+
+# Sparkle.framework is loaded at run time with NSBundle (no link-time
+# dependency), so `cargo build` and `cargo test` never need the framework.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSBundle",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSSet",
+    "NSString",
+    "NSURL",
+] }
+
+# The smoke example spins the main run loop while Sparkle works.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSDate",
+    "NSRunLoop",
+] }
+
+[[test]]
+# Sparkle and NSBundle must be driven from the main thread, which libtest's
+# worker threads are not, so this test supplies its own `main`.
+name = "load_unbundled"
+harness = false
+
+# Not `lints.workspace`: the workspace forbids `unsafe_code`, and this crate is
+# where the Objective-C runtime calls live. Otherwise mirrors the workspace set.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+needless_pass_by_value = "allow"

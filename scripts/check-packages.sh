@@ -12,7 +12,7 @@ trap 'rm -rf "$scratch"' EXIT
 # Cargo stages unpublished workspace dependencies together. Verification below
 # uses only the extracted archives, never the original workspace source paths.
 cargo package --workspace --allow-dirty --no-verify
-for package in gpui-updater-core gpui-updater gpui-updater-pre; do
+for package in gpui-updater-core gpui-updater gpui-updater-pre gpui-updater-sparkle; do
     archive="$CARGO_TARGET_DIR/package/$package-$version.crate"
     tar -xzf "$archive" -C "$scratch"
     extracted="$scratch/$package-$version"

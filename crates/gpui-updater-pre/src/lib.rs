@@ -1,11 +1,16 @@
 //! GPUI integration: an observable `Entity<Updater>` that drives the blocking
-//! [`UpdateEngine`] on the app's executors.
+//! [`UpdateEngine`] on the app's executors, or an external [`UpdateDriver`].
 //!
 //! The update runs on the background executor so the UI thread never blocks;
 //! state transitions land back on the foreground via the entity and call
 //! [`Context::notify`], so any view can `cx.observe(&updater, …)` to re-render.
 //! When an update is staged, `App::set_restart_path` is set so the next
 //! `cx.restart()` launches the new version.
+//!
+//! With [`Updater::with_driver`], an external [`UpdateDriver`] (such as
+//! Sparkle, via `gpui-updater-sparkle`) runs the whole flow instead and
+//! reports [`DriverEvent`]s, which the entity maps onto the same
+//! [`UpdateStatus`]. Views do not need to know which backend is in use.
 //!
 //! ```no_run
 //! # use gpui::{AppContext as _, Context, Entity};
@@ -27,10 +32,13 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use futures::StreamExt as _;
+use futures::channel::mpsc;
 use gpui::{Context, Task};
 
 pub use gpui_updater_core::*;
@@ -44,13 +52,28 @@ type BoxedEngine = UpdateEngine<Box<dyn UpdateSource>>;
 /// polling — which suits a privacy-conscious "Check for updates" button. To
 /// poll, call [`check`](Self::check) yourself on a timer.
 ///
+/// Build it with [`Updater::new`] to run the built-in [`UpdateEngine`], or
+/// with [`Updater::with_driver`] to delegate to an external
+/// [`UpdateDriver`]. A driver may also check on its own schedule (Sparkle
+/// does when automatic checks are on).
+///
 /// Dropping the entity cancels its foreground task, not an already-running
 /// blocking download or install. It does not roll back an installation.
 pub struct Updater {
     status: UpdateStatus,
     available: Option<Release>,
-    engine: Arc<BoxedEngine>,
+    backend: Backend,
     task: Option<Task<()>>,
+}
+
+enum Backend {
+    Engine(Arc<BoxedEngine>),
+    Driver {
+        driver: Box<dyn UpdateDriver>,
+        /// Applies queued driver events on the foreground; dropped with the
+        /// `Updater`, which stops the pump.
+        _events: Task<()>,
+    },
 }
 
 impl Updater {
@@ -60,7 +83,41 @@ impl Updater {
         Self {
             status: UpdateStatus::Idle,
             available: None,
-            engine: Arc::new(engine),
+            backend: Backend::Engine(Arc::new(engine)),
+            task: None,
+        }
+    }
+
+    /// Create an updater that delegates the whole flow to `driver`.
+    ///
+    /// The driver is started immediately; its [`DriverEvent`]s update
+    /// [`status`](Self::status) on the foreground. [`check`](Self::check),
+    /// [`download_and_install`](Self::download_and_install) and
+    /// [`restart`](Self::restart) forward to the driver.
+    pub fn with_driver<D: UpdateDriver>(mut driver: D, cx: &mut Context<Self>) -> Self {
+        let (tx, mut rx) = mpsc::unbounded::<DriverEvent>();
+        // Sending fails only once the pump below is gone, i.e. the `Updater`
+        // was dropped. Nobody is left to tell, so the event is discarded.
+        driver.start(DriverEvents::new(move |event| {
+            tx.unbounded_send(event).ok();
+        }));
+        let events = cx.spawn(async move |this, cx| {
+            while let Some(event) = rx.next().await {
+                if this
+                    .update(cx, |this, cx| this.apply_driver_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            status: UpdateStatus::Idle,
+            available: None,
+            backend: Backend::Driver {
+                driver: Box::new(driver),
+                _events: events,
+            },
             task: None,
         }
     }
@@ -73,9 +130,29 @@ impl Updater {
 
     /// The release discovered by the last successful [`check`](Self::check),
     /// if it was newer than the running version.
+    ///
+    /// With a driver this is the release the driver last reported; its asset
+    /// and signature fields describe what the driver will install, but the
+    /// driver performs the download itself.
     #[must_use]
     pub fn available(&self) -> Option<&Release> {
         self.available.as_ref()
+    }
+
+    /// Whether this updater delegates to an external [`UpdateDriver`].
+    #[must_use]
+    pub fn is_driver_backed(&self) -> bool {
+        matches!(self.backend, Backend::Driver { .. })
+    }
+
+    /// The driver of type `D`, if this updater was built with
+    /// [`with_driver`](Self::with_driver) and that driver is a `D`. Use it to
+    /// reach driver-specific settings (such as Sparkle's automatic checks).
+    pub fn driver_mut<D: UpdateDriver>(&mut self) -> Option<&mut D> {
+        match &mut self.backend {
+            Backend::Driver { driver, .. } => (driver.as_mut() as &mut dyn Any).downcast_mut::<D>(),
+            Backend::Engine(_) => None,
+        }
     }
 
     fn set_status(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
@@ -83,13 +160,61 @@ impl Updater {
         cx.notify();
     }
 
-    /// Check the source for a newer release. No-op while already busy.
+    fn apply_driver_event(&mut self, event: DriverEvent, cx: &mut Context<Self>) {
+        let status = match event {
+            DriverEvent::Checking => UpdateStatus::Checking,
+            DriverEvent::UpToDate => {
+                // Unlike an engine check, a driver's "up to date" means it has
+                // nothing to install, so `Settled` must not resurrect an
+                // earlier release.
+                self.available = None;
+                UpdateStatus::UpToDate
+            }
+            DriverEvent::Found(release) => {
+                let version = release.version.clone();
+                self.available = Some(release);
+                UpdateStatus::Available(version)
+            }
+            DriverEvent::Downloading { downloaded, total } => {
+                UpdateStatus::Downloading { downloaded, total }
+            }
+            DriverEvent::Installing => UpdateStatus::Installing,
+            DriverEvent::ReadyToRelaunch(version) => UpdateStatus::Staged(version),
+            DriverEvent::Failed(message) => UpdateStatus::Errored(message),
+            DriverEvent::Settled => {
+                if !self.status.is_busy() {
+                    return;
+                }
+                self.available
+                    .as_ref()
+                    .map_or(UpdateStatus::Idle, |release| {
+                        UpdateStatus::Available(release.version.clone())
+                    })
+            }
+            // `DriverEvent` is non-exhaustive; ignore events this adapter
+            // does not know yet.
+            _ => return,
+        };
+        self.set_status(status, cx);
+    }
+
+    /// Check for a newer release.
+    ///
+    /// With the engine this is a no-op while already busy. With a driver it
+    /// forwards to [`UpdateDriver::check`], which may also bring an update
+    /// prompt the driver is already showing to the front.
     pub fn check(&mut self, cx: &mut Context<Self>) {
+        let engine = match &mut self.backend {
+            Backend::Driver { driver, .. } => {
+                driver.check();
+                return;
+            }
+            Backend::Engine(engine) => engine.clone(),
+        };
         if self.status.is_busy() {
             return;
         }
         self.set_status(UpdateStatus::Checking, cx);
-        let engine = self.engine.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -112,18 +237,26 @@ impl Updater {
     }
 
     /// Download the available update, verify it, and swap it into place.
-    /// No-op unless a newer release is [`available`](Self::available).
+    /// With the engine this is a no-op unless a newer release is
+    /// [`available`](Self::available).
     ///
     /// On success the status becomes [`UpdateStatus::Staged`] and the app's
     /// restart path is set to the new binary; call [`restart`](Self::restart).
+    /// With a driver this forwards to [`UpdateDriver::install`].
     pub fn download_and_install(&mut self, cx: &mut Context<Self>) {
+        let engine = match &mut self.backend {
+            Backend::Driver { driver, .. } => {
+                driver.install();
+                return;
+            }
+            Backend::Engine(engine) => engine.clone(),
+        };
         if self.status.is_busy() {
             return;
         }
         let Some(release) = self.available.clone() else {
             return;
         };
-        let engine = self.engine.clone();
         self.set_status(
             UpdateStatus::Downloading {
                 downloaded: 0,
@@ -211,10 +344,16 @@ impl Updater {
         }));
     }
 
-    /// Relaunch into the staged update (uses the restart path set during
-    /// [`download_and_install`](Self::download_and_install)).
-    pub fn restart(&self, cx: &mut Context<Self>) {
-        cx.restart();
+    /// Relaunch into the staged update.
+    ///
+    /// With the engine this uses the restart path set during
+    /// [`download_and_install`](Self::download_and_install). With a driver it
+    /// forwards to [`UpdateDriver::relaunch`].
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        match &mut self.backend {
+            Backend::Driver { driver, .. } => driver.relaunch(),
+            Backend::Engine(_) => cx.restart(),
+        }
     }
 }
 
