@@ -42,6 +42,18 @@ pub enum Error {
     #[error("verification policy not satisfied: {0}")]
     VerificationRequired(String),
 
+    /// The downloaded app is not one the policy accepts: its bundle version
+    /// differs from the release version, or it is not code-signed by the
+    /// expected team.
+    #[error("update payload rejected: {0}")]
+    Payload(String),
+    /// The signed release manifest is past its `expires` time, so it may be
+    /// a stale copy replayed to hide newer releases.
+    #[error("release manifest expired at {expires}")]
+    ManifestExpired {
+        /// The manifest's `expires` value.
+        expires: String,
+    },
     /// Installing the downloaded update failed.
     #[error("install failed: {0}")]
     Install(String),

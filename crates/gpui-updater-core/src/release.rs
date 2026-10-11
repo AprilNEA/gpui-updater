@@ -41,12 +41,17 @@ pub struct Release {
     pub deltas: Vec<DeltaAsset>,
 }
 
-/// A binary delta that upgrades one specific installed version to the release
-/// it is attached to.
+/// A binary delta that upgrades one specific installed version to another.
+///
+/// Most deltas end at the release they are attached to. Sources that also list
+/// deltas of earlier releases let the engine chain several of them when no
+/// delta starts at the installed version.
 #[derive(Debug, Clone)]
 pub struct DeltaAsset {
     /// The installed version this delta applies to.
     pub from: Version,
+    /// The version this delta produces.
+    pub to: Version,
     /// Delta format, e.g. [`DELTA_FORMAT_FILES_BSDIFF_V1`]. Deltas in unknown
     /// formats are ignored.
     pub format: String,
@@ -54,6 +59,10 @@ pub struct DeltaAsset {
     pub asset: Asset,
     /// Expected lowercase hex SHA-256 of the delta file, when published.
     pub sha256: Option<String>,
+    /// URL of a `SHA256SUMS`-style file listing the delta's checksum under
+    /// `asset.name`, fetched only if this delta is actually used. Ignored when
+    /// `sha256` is set.
+    pub checksums_url: Option<String>,
     /// Inline detached minisign signature of the delta file, when published.
     pub signature: Option<String>,
     /// URL of a detached minisign signature of the delta file, when published.

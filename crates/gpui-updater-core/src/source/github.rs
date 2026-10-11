@@ -6,6 +6,7 @@ use super::UpdateSource;
 use crate::error::{Error, Result};
 use crate::http;
 use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
+use crate::verify::sha256_from_sums;
 
 const API: &str = "https://api.github.com";
 
@@ -15,7 +16,9 @@ const API: &str = "https://api.github.com";
 /// selected asset `<asset>`, a release asset named `<asset>.from-<version>.delta`
 /// is a delta from `<version>`. Its checksum is read from the same checksums
 /// file and its signature from `<asset>.from-<version>.delta.minisig` (with the
-/// configured suffix). Delta files are never picked as the main asset.
+/// configured suffix). Delta files are never picked as the main asset. With
+/// [`delta_history`](Self::delta_history), deltas attached to earlier releases
+/// are listed too, so the engine can chain them.
 ///
 /// ```no_run
 /// use gpui_updater_core::GitHubSource;
@@ -39,6 +42,8 @@ pub struct GitHubSource {
     signature_suffix: Option<String>,
     /// Whether to consider pre-releases as well as full releases.
     include_prereleases: bool,
+    /// How many earlier releases to read deltas from.
+    delta_history: usize,
     /// Optional token for private repos / higher rate limits.
     token: Option<String>,
 }
@@ -54,6 +59,7 @@ impl GitHubSource {
             sums_asset: None,
             signature_suffix: None,
             include_prereleases: false,
+            delta_history: 0,
             token: None,
         }
     }
@@ -109,20 +115,34 @@ impl GitHubSource {
         self
     }
 
-    fn fetch_release(&self, headers: &[(&str, &str)]) -> Result<GhRelease> {
-        if self.include_prereleases {
-            let url = format!(
-                "{API}/repos/{}/{}/releases?per_page=30",
-                self.owner, self.repo
-            );
-            let list: Vec<GhRelease> = http::get_json(&url, headers)?;
-            list.into_iter()
-                .find(|r| !r.draft)
-                .ok_or_else(|| Error::Parse("repository has no releases".to_string()))
-        } else {
+    /// Also read the deltas attached to up to `releases` earlier releases, so
+    /// the engine can chain them when no delta starts at the installed version
+    /// (publish them with `delta::delta_bases`). This lists releases instead
+    /// of asking for `/releases/latest`: still one API request, covering up
+    /// to 100 releases.
+    #[must_use]
+    pub fn delta_history(mut self, releases: usize) -> Self {
+        self.delta_history = releases;
+        self
+    }
+
+    /// The release to offer, followed by up to `delta_history` earlier ones.
+    fn fetch_releases(&self, headers: &[(&str, &str)]) -> Result<Vec<GhRelease>> {
+        if !self.include_prereleases && self.delta_history == 0 {
             let url = format!("{API}/repos/{}/{}/releases/latest", self.owner, self.repo);
-            http::get_json(&url, headers)
+            return Ok(vec![http::get_json(&url, headers)?]);
         }
+        let per_page = (self.delta_history + 1).clamp(30, 100);
+        let url = format!(
+            "{API}/repos/{}/{}/releases?per_page={per_page}",
+            self.owner, self.repo
+        );
+        let list: Vec<GhRelease> = http::get_json(&url, headers)?;
+        Ok(list
+            .into_iter()
+            .filter(|r| !r.draft && (self.include_prereleases || !r.prerelease))
+            .take(self.delta_history + 1)
+            .collect())
     }
 }
 
@@ -137,77 +157,111 @@ impl UpdateSource for GitHubSource {
             headers.push(("authorization", auth));
         }
 
-        let release = self.fetch_release(&headers)?;
+        let releases = self.fetch_releases(&headers)?;
+        let Some((release, older)) = releases.split_first() else {
+            return Err(Error::Parse("repository has no releases".to_string()));
+        };
         let version = parse_tag(&release.tag_name)?;
-
         let main =
             select_asset(&release.assets, &self.asset_patterns).ok_or(Error::NoMatchingAsset {
                 target_os: std::env::consts::OS,
                 target_arch: std::env::consts::ARCH,
             })?;
-        let asset = Asset {
-            name: main.name.clone(),
-            url: main.browser_download_url.clone(),
-            size: main.size,
-        };
 
-        let signature_for = |name: &str| {
-            self.signature_suffix.as_ref().and_then(|suffix| {
-                let want = format!("{name}{suffix}");
-                release
-                    .assets
-                    .iter()
-                    .find(|a| a.name == want)
-                    .map(|a| a.browser_download_url.clone())
-            })
-        };
-        let signature_url = signature_for(&main.name);
-
-        let sums = match &self.sums_asset {
-            Some(sums_name) => match release.assets.iter().find(|a| &a.name == sums_name) {
-                Some(sums) => Some(http::get_string(&sums.browser_download_url, &headers)?),
-                None => None,
-            },
+        let sums = match self.sums_asset_of(release) {
+            Some(sums) => Some(http::get_string(&sums.browser_download_url, &headers)?),
             None => None,
         };
-        let sha256_for = |name: &str| {
-            sums.as_deref()
-                .and_then(|text| parse_sha256_for(text, name))
-        };
-        let sha256 = sha256_for(&main.name);
+        let sha256 = sums
+            .as_deref()
+            .and_then(|text| sha256_from_sums(text, &main.name));
+        let mut deltas = self.deltas_of(release, main, &Sums::Fetched(sums.as_deref()));
+        // Earlier releases' deltas let the engine chain several hops. Their
+        // checksums are only fetched if a chain actually uses them.
+        for old in older {
+            if let Some(old_main) = select_asset(&old.assets, &self.asset_patterns) {
+                let url = self
+                    .sums_asset_of(old)
+                    .map(|a| a.browser_download_url.clone());
+                deltas.extend(self.deltas_of(old, old_main, &Sums::Deferred(url)));
+            }
+        }
 
-        let deltas = release
+        Ok(Release {
+            version,
+            notes: release
+                .body
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| release.name.clone()),
+            asset: Asset {
+                name: main.name.clone(),
+                url: main.browser_download_url.clone(),
+                size: main.size,
+            },
+            signature: None,
+            signature_url: self.signature_for(release, &main.name),
+            sha256,
+            deltas,
+        })
+    }
+}
+
+/// Where the checksums of a release's deltas come from.
+enum Sums<'a> {
+    /// The release's checksums file, already downloaded.
+    Fetched(Option<&'a str>),
+    /// The URL of the release's checksums file, for the engine to fetch if
+    /// it uses one of these deltas.
+    Deferred(Option<String>),
+}
+
+impl GitHubSource {
+    fn signature_for(&self, release: &GhRelease, name: &str) -> Option<String> {
+        let suffix = self.signature_suffix.as_ref()?;
+        let want = format!("{name}{suffix}");
+        release
+            .assets
+            .iter()
+            .find(|a| a.name == want)
+            .map(|a| a.browser_download_url.clone())
+    }
+
+    fn sums_asset_of<'a>(&self, release: &'a GhRelease) -> Option<&'a GhAsset> {
+        let name = self.sums_asset.as_ref()?;
+        release.assets.iter().find(|a| &a.name == name)
+    }
+
+    /// The deltas attached to `release`, whose platform asset is `main`.
+    fn deltas_of(&self, release: &GhRelease, main: &GhAsset, sums: &Sums<'_>) -> Vec<DeltaAsset> {
+        let Ok(to) = parse_tag(&release.tag_name) else {
+            return Vec::new();
+        };
+        release
             .assets
             .iter()
             .filter_map(|a| {
                 let from = delta_from(&main.name, &a.name)?;
+                let (sha256, checksums_url) = match sums {
+                    Sums::Fetched(text) => (text.and_then(|t| sha256_from_sums(t, &a.name)), None),
+                    Sums::Deferred(url) => (None, url.clone()),
+                };
                 Some(DeltaAsset {
                     from,
+                    to: to.clone(),
                     format: DELTA_FORMAT_FILES_BSDIFF_V1.to_string(),
                     asset: Asset {
                         name: a.name.clone(),
                         url: a.browser_download_url.clone(),
                         size: a.size,
                     },
-                    sha256: sha256_for(&a.name),
+                    sha256,
+                    checksums_url,
                     signature: None,
-                    signature_url: signature_for(&a.name),
+                    signature_url: self.signature_for(release, &a.name),
                 })
             })
-            .collect();
-
-        Ok(Release {
-            version,
-            notes: release
-                .body
-                .filter(|s| !s.trim().is_empty())
-                .or(release.name),
-            asset,
-            signature: None,
-            signature_url,
-            sha256,
-            deltas,
-        })
+            .collect()
     }
 }
 
@@ -249,29 +303,6 @@ fn delta_from(main: &str, candidate: &str) -> Option<semver::Version> {
     parse_tag(version).ok()
 }
 
-/// Find the SHA-256 for `asset_name` in the contents of a `shasum`-style file.
-///
-/// Lines look like `<hex>  <path>` (an optional `*` marks binary mode); the
-/// `<path>` may carry a directory prefix, so matching is by basename.
-fn parse_sha256_for(sums: &str, asset_name: &str) -> Option<String> {
-    for line in sums.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let (Some(hash), Some(path)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        let path = path.strip_prefix('*').unwrap_or(path);
-        let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
-        if base == asset_name {
-            return Some(hash.to_ascii_lowercase());
-        }
-    }
-    None
-}
-
 #[derive(Debug, Deserialize)]
 struct GhRelease {
     tag_name: String,
@@ -281,6 +312,8 @@ struct GhRelease {
     body: Option<String>,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    prerelease: bool,
     #[serde(default)]
     assets: Vec<GhAsset>,
 }
@@ -381,22 +414,63 @@ mod tests {
         assert!(delta_from("app-macos.dmg", "app-macos.dmg.from-latest.delta").is_none());
     }
 
+    fn gh_release(tag: &str, names: &[&str]) -> GhRelease {
+        GhRelease {
+            tag_name: tag.into(),
+            name: None,
+            body: None,
+            draft: false,
+            prerelease: false,
+            assets: names
+                .iter()
+                .map(|n| GhAsset {
+                    name: (*n).into(),
+                    browser_download_url: format!("https://x/{tag}/{n}"),
+                    size: 7,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
-    fn parses_checksum_by_basename_ignoring_dir_prefix() {
-        let sums = "\
-abc123  dist/app-macos.dmg
-DEF456  dist/app-linux.tar.gz
-";
-        assert_eq!(
-            parse_sha256_for(sums, "app-macos.dmg").as_deref(),
-            Some("abc123")
+    fn lists_deltas_of_earlier_releases_with_deferred_checksums() {
+        let source = GitHubSource::new("o", "r")
+            .asset_patterns(pats(&["macos", ".dmg"]))
+            .with_checksums("SHA256SUMS")
+            .with_minisig();
+        let old = gh_release(
+            "v0.8.12",
+            &[
+                "app-0.8.12-macos.dmg",
+                "app-0.8.12-macos.dmg.from-0.8.11.delta",
+                "app-0.8.12-macos.dmg.from-0.8.11.delta.minisig",
+                "app-0.8.12-linux.tar.gz.from-0.8.11.delta",
+                "SHA256SUMS",
+            ],
         );
-        // case-normalised to lowercase
+        let main = select_asset(&old.assets, &source.asset_patterns).unwrap();
+        let deferred = Sums::Deferred(Some("https://x/v0.8.12/SHA256SUMS".into()));
+        let deltas = source.deltas_of(&old, main, &deferred);
+        assert_eq!(deltas.len(), 1);
+        let d = &deltas[0];
         assert_eq!(
-            parse_sha256_for(sums, "app-linux.tar.gz").as_deref(),
-            Some("def456")
+            (d.from.to_string(), d.to.to_string()),
+            ("0.8.11".into(), "0.8.12".into())
         );
-        assert!(parse_sha256_for(sums, "app-windows.exe").is_none());
+        assert_eq!(d.sha256, None);
+        assert_eq!(
+            d.checksums_url.as_deref(),
+            Some("https://x/v0.8.12/SHA256SUMS")
+        );
+        assert_eq!(
+            d.signature_url.as_deref(),
+            Some("https://x/v0.8.12/app-0.8.12-macos.dmg.from-0.8.11.delta.minisig")
+        );
+
+        let sums = "abc  app-0.8.12-macos.dmg.from-0.8.11.delta\n";
+        let fetched = source.deltas_of(&old, main, &Sums::Fetched(Some(sums)));
+        assert_eq!(fetched[0].sha256.as_deref(), Some("abc"));
+        assert_eq!(fetched[0].checksums_url, None);
     }
 
     #[test]

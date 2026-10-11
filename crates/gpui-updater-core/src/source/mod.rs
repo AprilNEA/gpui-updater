@@ -6,6 +6,7 @@
 
 mod github;
 mod manifest;
+mod trust;
 
 pub use github::GitHubSource;
 pub use manifest::StaticManifestSource;

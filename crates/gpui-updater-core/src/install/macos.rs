@@ -16,15 +16,18 @@ pub(crate) fn bundle_root(exe: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn install(artifact: &Path, app_root: &Path) -> Result<Installed> {
-    // A directory is a payload that is already unpacked, such as a bundle the
-    // engine rebuilt from a delta. Treat it like the root of a mounted image.
+    with_app(artifact, |new_app| swap_in(new_app, app_root))
+}
+
+/// Run `f` on the `.app` inside `artifact`: a `.dmg`, mounted read-only for
+/// the duration of the call, or a directory holding an unpacked payload, such
+/// as a bundle the engine rebuilt from a delta.
+pub(crate) fn with_app<T>(artifact: &Path, f: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
     if artifact.is_dir() {
-        let new_app = find_app(artifact)?;
-        return swap_in(&new_app, app_root);
+        return f(&find_app(artifact)?);
     }
     let mount = Mount::attach(artifact)?;
-    let new_app = find_app(&mount.dir)?;
-    swap_in(&new_app, app_root)
+    f(&find_app(&mount.dir)?)
 }
 
 /// Copy `new_app` next to `app_root` and atomically swap it into place.

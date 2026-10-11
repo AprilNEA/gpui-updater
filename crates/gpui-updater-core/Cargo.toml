@@ -15,10 +15,11 @@ categories = ["development-tools"]
 default = []
 # Binary delta updates: `delta::create` for release CI, and delta-first
 # downloads in `UpdateEngine` with automatic fallback to the full artifact.
-delta = ["dep:qbsdiff", "dep:bzip2"]
+delta = ["dep:qbsdiff", "dep:bzip2", "dep:lzma-rust2"]
 
 [dependencies]
 bzip2 = { version = "0.6", optional = true }
+lzma-rust2 = { version = "0.22", optional = true, default-features = false, features = ["std", "encoder"] }
 minisign-verify = "0.2.5"
 qbsdiff = { version = "1.4", optional = true, default-features = false }
 semver = "1"
@@ -30,6 +31,7 @@ tracing = "0.1"
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 
 [dev-dependencies]
+minisign = "0.7"
 tempfile = "3"
 
 [[example]]

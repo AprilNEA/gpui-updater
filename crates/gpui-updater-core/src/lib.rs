@@ -68,7 +68,10 @@ pub mod install;
 pub mod source;
 pub mod verify;
 
-pub use engine::{EngineConfig, UpdateEngine, Verification};
+pub use engine::{
+    BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, EngineConfig, UpdateEngine, Verification,
+    VersionBinding,
+};
 pub use error::{Error, Result};
 pub use install::{Installed, current_install_root};
 pub use release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
