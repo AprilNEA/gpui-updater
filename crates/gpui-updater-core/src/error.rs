@@ -46,6 +46,12 @@ pub enum Error {
     #[error("install failed: {0}")]
     Install(String),
 
+    /// A binary delta could not be created or applied: it is malformed, or the
+    /// installed files are not the version it expects. The engine treats this
+    /// as recoverable and falls back to the full download.
+    #[error("delta update failed: {0}")]
+    Delta(String),
+
     /// The current platform has no install strategy yet.
     #[error("update install is not supported on this platform ({0})")]
     UnsupportedPlatform(&'static str),

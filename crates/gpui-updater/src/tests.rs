@@ -32,6 +32,7 @@ fn release(version: u64) -> Release {
         signature: None,
         signature_url: None,
         sha256: None,
+        deltas: Vec::new(),
     }
 }
 

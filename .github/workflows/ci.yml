@@ -40,6 +40,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p gpui-updater-core --all-targets --locked -- -D warnings
+      - run: cargo clippy -p gpui-updater-core --features delta --all-targets --locked -- -D warnings
       - run: cargo doc -p gpui-updater-core --no-deps --locked
 
   # Core builds and tests at its own MSRV without GPUI. Running the
@@ -57,6 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p gpui-updater-core --all-targets --locked
+      - run: cargo test -p gpui-updater-core --features delta --all-targets --locked
       - run: cargo test -p gpui-updater-core --doc --locked
 
   # Independent builds prevent workspace feature unification from concealing

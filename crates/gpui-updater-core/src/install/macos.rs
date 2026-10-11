@@ -15,7 +15,20 @@ pub(crate) fn bundle_root(exe: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-pub(crate) fn install(dmg: &Path, app_root: &Path) -> Result<Installed> {
+pub(crate) fn install(artifact: &Path, app_root: &Path) -> Result<Installed> {
+    // A directory is a payload that is already unpacked, such as a bundle the
+    // engine rebuilt from a delta. Treat it like the root of a mounted image.
+    if artifact.is_dir() {
+        let new_app = find_app(artifact)?;
+        return swap_in(&new_app, app_root);
+    }
+    let mount = Mount::attach(artifact)?;
+    let new_app = find_app(&mount.dir)?;
+    swap_in(&new_app, app_root)
+}
+
+/// Copy `new_app` next to `app_root` and atomically swap it into place.
+fn swap_in(new_app: &Path, app_root: &Path) -> Result<Installed> {
     let parent = app_root
         .parent()
         .ok_or_else(|| Error::Install("install root has no parent directory".to_string()))?;
@@ -23,14 +36,11 @@ pub(crate) fn install(dmg: &Path, app_root: &Path) -> Result<Installed> {
         .file_name()
         .ok_or_else(|| Error::Install("install root has no file name".to_string()))?;
 
-    let mount = Mount::attach(dmg)?;
-    let new_app = find_app(&mount.dir)?;
-
     // Stage a copy on the *same* volume as the target so the final move is a
     // cheap, atomic rename rather than a cross-device copy.
     let staging = parent.join(format!(".{}.new", name.to_string_lossy()));
     let _ = fs::remove_dir_all(&staging);
-    ditto(&new_app, &staging)?;
+    ditto(new_app, &staging)?;
 
     // Swap: move the old bundle aside, move the new one in, then delete the old.
     // Roll back if the rename-in fails so we never leave the app missing.
@@ -100,7 +110,7 @@ impl Drop for Mount {
     }
 }
 
-/// Find the single `*.app` at the root of a mounted volume.
+/// Find the single `*.app` at the root of a mounted volume or payload directory.
 fn find_app(mount: &Path) -> Result<PathBuf> {
     for entry in fs::read_dir(mount)? {
         let path = entry?.path();
@@ -179,6 +189,29 @@ mod tests {
         assert_eq!(installed.restart_path, Some(app_root.clone()));
         let swapped = fs::read_to_string(app_root.join("Contents/MacOS/demo")).unwrap();
         assert_eq!(swapped, "new");
+
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn installs_an_unpacked_payload_directory() {
+        let work = unique_temp_dir("gpui-updater-test").unwrap();
+        let payload = work.join("rebuilt");
+        fs::create_dir_all(payload.join("Demo.app/Contents/MacOS")).unwrap();
+        fs::write(payload.join("Demo.app/Contents/MacOS/demo"), "rebuilt").unwrap();
+
+        let app_root = work.join("Applications/Demo.app");
+        fs::create_dir_all(app_root.join("Contents/MacOS")).unwrap();
+        fs::write(app_root.join("Contents/MacOS/demo"), "old").unwrap();
+        fs::write(app_root.join("Contents/stale"), "removed by the swap").unwrap();
+
+        let installed = install(&payload, &app_root).unwrap();
+        assert_eq!(installed.restart_path, Some(app_root.clone()));
+        let swapped = fs::read_to_string(app_root.join("Contents/MacOS/demo")).unwrap();
+        assert_eq!(swapped, "rebuilt");
+        assert!(!app_root.join("Contents/stale").exists());
+        assert!(!work.join("Applications/.Demo.app.new").exists());
+        assert!(!work.join("Applications/.Demo.app.old").exists());
 
         let _ = fs::remove_dir_all(&work);
     }

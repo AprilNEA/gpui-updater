@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::Installed;
 use crate::error::{Error, Result};
 
-pub(crate) fn install(tarball: &Path, install_root: &Path) -> Result<Installed> {
+pub(crate) fn install(artifact: &Path, install_root: &Path) -> Result<Installed> {
     let parent = install_root
         .parent()
         .ok_or_else(|| Error::Install("install root has no parent directory".to_string()))?;
@@ -19,9 +19,19 @@ pub(crate) fn install(tarball: &Path, install_root: &Path) -> Result<Installed> 
         .and_then(OsStr::to_str)
         .ok_or_else(|| Error::Install("install root has no file name".to_string()))?;
 
+    // A directory is a payload that is already unpacked, such as a binary the
+    // engine rebuilt from a delta. Treat it like an extracted archive.
+    if artifact.is_dir() {
+        let new_bin = find_binary(artifact, name)?;
+        replace_binary(&new_bin, parent, name, install_root)?;
+        return Ok(Installed {
+            restart_path: Some(install_root.to_path_buf()),
+        });
+    }
+
     // Stage on the same volume as the target so the final rename is atomic.
     let staging = unique_dir(parent, "gpui-updater-stage")?;
-    let extract = extract_tar_gz(tarball, &staging);
+    let extract = extract_tar_gz(artifact, &staging);
     let new_bin = extract.and_then(|()| find_binary(&staging, name));
     let new_bin = match new_bin {
         Ok(p) => p,
@@ -31,24 +41,29 @@ pub(crate) fn install(tarball: &Path, install_root: &Path) -> Result<Installed> 
         }
     };
 
-    // Replacing a running executable by rename is permitted on Linux (the old
-    // inode stays live for the running process).
-    let tmp = parent.join(format!(".{name}.new"));
-    let result = (|| {
-        fs::copy(&new_bin, &tmp)?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-        fs::rename(&tmp, install_root)
-            .map_err(|e| Error::Install(format!("could not replace binary: {e}")))
-    })();
+    let result = replace_binary(&new_bin, parent, name, install_root);
     let _ = fs::remove_dir_all(&staging);
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
     result?;
 
     Ok(Installed {
         restart_path: Some(install_root.to_path_buf()),
     })
+}
+
+fn replace_binary(new_bin: &Path, parent: &Path, name: &str, install_root: &Path) -> Result<()> {
+    // Replacing a running executable by rename is permitted on Linux (the old
+    // inode stays live for the running process).
+    let tmp = parent.join(format!(".{name}.new"));
+    let result = (|| {
+        fs::copy(new_bin, &tmp)?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+        fs::rename(&tmp, install_root)
+            .map_err(|e| Error::Install(format!("could not replace binary: {e}")))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn extract_tar_gz(tarball: &Path, dest: &Path) -> Result<()> {
@@ -152,5 +167,20 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".gpui-updater-stage")
         }));
+    }
+
+    #[test]
+    fn installs_an_unpacked_payload_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("demo");
+        fs::write(&root, b"old binary").unwrap();
+        let payload = dir.path().join("rebuilt");
+        fs::create_dir(&payload).unwrap();
+        fs::write(payload.join("demo"), b"rebuilt binary").unwrap();
+
+        let installed = install(&payload, &root).unwrap();
+        assert_eq!(installed.restart_path, Some(root.clone()));
+        assert_eq!(fs::read(&root).unwrap(), b"rebuilt binary");
+        assert!(!dir.path().join(".demo.new").exists());
     }
 }

@@ -11,6 +11,11 @@ readme = "../../README.md"
 keywords = ["gpui", "updater", "auto-update", "desktop"]
 categories = ["gui", "development-tools"]
 
+[features]
+default = []
+# Delta-first downloads with automatic fallback; see gpui-updater-core.
+delta = ["gpui-updater-core/delta"]
+
 [dependencies]
 gpui-updater-core = { version = "0.1.0", path = "../gpui-updater-core" }
 gpui = { version = "0.2.2", default-features = false }

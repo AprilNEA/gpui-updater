@@ -20,6 +20,10 @@ apps).
 - **Verification** — SHA-256 against the published checksums, plus optional
   [minisign] (Ed25519) signature verification. Transport security alone is not
   trusted.
+- **Delta updates** (optional `delta` feature) — download a small per-file
+  bsdiff patch instead of the full artifact and rebuild the new `.app` bundle
+  or executable from the installed one. Any problem falls back to the full
+  download. See [Delta updates](#delta-updates).
 - **Install** — platform-native swaps:
   - **macOS**: mount the `.dmg`, `ditto` the new (already-notarized) `.app` onto
     the target volume, then atomically replace the bundle. Nothing is re-signed
@@ -257,6 +261,97 @@ For R2/S3-style hosting, the recommended release flow is:
 4. Upload `latest.json` to a mutable channel prefix such as
    `/channels/stable/latest.json` after all artifacts are in place.
 
+### Delta updates
+
+Enable the `delta` feature on whichever crate you depend on
+(`gpui-updater-core`, `gpui-updater`, or `gpui-updater-pre`). Nothing else
+changes in your app: `download` tries a delta from the running version first
+and otherwise behaves exactly as before.
+
+```toml
+gpui-updater = { version = "0.1", features = ["delta"] }
+```
+
+A delta in the `files-bsdiff-v1` format rebuilds the new install tree (the
+`.app` bundle on macOS, the executable on Linux) from the installed one. It
+works on unpacked content, because diffing the compressed `.dmg` or `.tar.gz`
+gains almost nothing. Every file is copied unchanged, patched with bsdiff, or
+stored whole, and each one records SHA-256 hashes of both the installed file it
+starts from and the file it must produce. When the update is applied:
+
+1. The delta file is downloaded and verified under the same `Verification`
+   policy as the full artifact: its own `sha256`, `signature`, and
+   `signature_url`. Under `Strict`, an unsigned delta is never downloaded.
+2. Its header must say exactly `current version -> offered version`, so a
+   validly signed delta cannot be replayed for another upgrade.
+3. Each installed file is hashed before use. A user-modified or partially
+   updated install is rejected instead of being patched into a broken one.
+4. Each rebuilt file is hashed after writing. The result is a directory holding
+   the rebuilt bundle, which `install` swaps in exactly like a mounted `.dmg`.
+   On macOS the rebuilt `.app` is byte-identical to the notarized one, so its
+   code signature and notarization stay valid. Nothing is re-signed.
+
+If any step fails (no delta for the running version, a network error, a bad
+checksum or signature, a modified install), the failure is logged with
+`tracing::warn!` and the full artifact is downloaded instead. The progress
+callback then restarts from zero. Deltas never make an update fail. Turn them
+off at runtime with `EngineConfig::deltas(false)`. Windows still uses full
+downloads.
+
+**Generating deltas** (release CI). Unpack the previous and new builds, then:
+
+```bash
+cargo run -p gpui-updater-core --features delta --release --example make_delta -- \
+    old/MyApp.app new/MyApp.app 1.2.2 1.2.3 MyApp-macos-arm64.dmg.from-1.2.2.delta --verify
+```
+
+`--verify` rebuilds the new build from the old one with the fresh delta before
+you publish it. Library users can call `gpui_updater_core::delta::create`
+directly. Generation keeps whole files in memory and runs bsdiff on each changed
+file, so it belongs in CI, not in the app. Sign each delta with minisign like
+any other artifact. Usually one delta from each of the last few versions is
+enough. Older installs just take the full download.
+
+**Publishing.** On GitHub Releases, name the delta
+`<asset>.from-<version>.delta`, e.g. `MyApp-macos-arm64.dmg.from-1.2.2.delta`.
+Its checksum is read from the same checksums file and its signature from
+`<delta name>.minisig`. Delta files are never picked as the main asset. In a
+static manifest, list deltas on the asset they rebuild:
+
+```json
+{
+  "name": "MyApp-v1.2.3-macos-arm64.dmg",
+  "url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg",
+  "sha256": "…",
+  "signature_url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg.minisig",
+  "deltas": [
+    {
+      "from": "1.2.2",
+      "url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg.from-1.2.2.delta",
+      "size": 1856073,
+      "sha256": "…",
+      "signature_url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg.from-1.2.2.delta.minisig"
+    }
+  ]
+}
+```
+
+`from` and `url` are required. `format` defaults to `files-bsdiff-v1`. A delta
+in an unknown format is ignored, so newer formats can be published next to
+older ones.
+
+Measured on [OpenLogi] macOS arm64 releases (19.7 MB `.dmg`, 51.4 MB unpacked):
+
+| Upgrade | Delta | Share of full download |
+| --- | --- | --- |
+| 0.8.12 → 0.8.13 | 1.86 MB | 9.4% |
+| 0.8.11 → 0.8.13 | 3.09 MB | 15.7% |
+
+Generating each delta took about 3 s with a peak of 260 MB of memory.
+Downloading and applying it locally took 0.8 s. The installed result was
+identical to the full 0.8.13 bundle, and `codesign --verify --deep --strict`
+and Gatekeeper (`spctl`, "Notarized Developer ID") both accepted it.
+
 ### GPUI entity
 
 Choose an adapter (see [Installation](#installation)); with the pre alias above
@@ -308,13 +403,19 @@ The workspace defaults to core; `cargo test` is not adapter coverage. Run:
 
 ```bash
 cargo +1.85.0 test -p gpui-updater-core --all-targets --locked
+cargo +1.85.0 test -p gpui-updater-core --features delta --all-targets --locked
 cargo test --workspace --all-targets --locked
 cargo test --workspace --doc --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy -p gpui-updater-core --features delta --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 bash scripts/check-packages.sh
 ```
+
+The `delta` feature adds `qbsdiff` and a pure-Rust bzip2. qbsdiff's suffix
+sorting builds a small C library (`cdivsufsort`), so the feature needs a C
+compiler, as `ring` already does.
 
 CI tests core/platform installers on Linux, macOS and Windows, and builds each
 registry adapter independently on Linux. Adapter tests use GPUI's seeded test
@@ -358,3 +459,4 @@ at your option.
 
 [GPUI]: https://www.gpui.rs/
 [minisign]: https://jedisct1.github.io/minisign/
+[OpenLogi]: https://github.com/AprilNEA/OpenLogi

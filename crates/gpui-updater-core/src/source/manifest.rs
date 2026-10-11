@@ -4,13 +4,16 @@
 //! `MinIO`, Backblaze B2, GitHub Pages, GitHub Releases, or a normal static web
 //! server. It does not speak the S3 API; the updater only needs a static JSON
 //! document plus direct artifact URLs.
+//!
+//! Each asset may list binary deltas from older versions under `deltas`; see
+//! [`StaticManifestSource`].
 
 use serde::Deserialize;
 
 use super::UpdateSource;
 use crate::error::{Error, Result};
 use crate::http;
-use crate::release::{Asset, Release, parse_tag};
+use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
 
 /// Reads release metadata from a static JSON manifest.
 ///
@@ -21,6 +24,22 @@ use crate::release::{Asset, Release, parse_tag};
 ///
 /// Required manifest fields are `version` and `assets`; required asset fields
 /// are `name` and `url`.
+///
+/// An asset can also carry `deltas`: binary deltas that rebuild it from an
+/// older installed version (see the `delta` feature). Each needs `from` and
+/// `url`; `name`, `format` (default `files-bsdiff-v1`), `size`, `sha256`,
+/// `signature`, and `signature_url` are optional and mean the same as on the
+/// asset. An entry whose `from` is not valid semver is ignored.
+///
+/// ```json
+/// "deltas": [{
+///   "from": "0.8.12",
+///   "url": "https://dl.example.com/v0.8.13/OpenLogi-macos-arm64.dmg.from-0.8.12.delta",
+///   "size": 1850000,
+///   "sha256": "…",
+///   "signature_url": "https://dl.example.com/v0.8.13/OpenLogi-macos-arm64.dmg.from-0.8.12.delta.minisig"
+/// }]
+/// ```
 ///
 /// ```no_run
 /// use gpui_updater_core::StaticManifestSource;
@@ -140,7 +159,41 @@ impl UpdateSource for StaticManifestSource {
             signature: main.signature.clone().filter(|s| !s.trim().is_empty()),
             signature_url: main.signature_url.clone().filter(|s| !s.trim().is_empty()),
             sha256: main.sha256.as_ref().map(|s| s.trim().to_ascii_lowercase()),
+            deltas: main.deltas.iter().filter_map(delta_asset).collect(),
         })
+    }
+}
+
+fn delta_asset(delta: &ManifestDelta) -> Option<DeltaAsset> {
+    let from = match parse_tag(&delta.from) {
+        Ok(from) => from,
+        Err(e) => {
+            tracing::warn!(error = %e, "ignoring manifest delta with an invalid `from` version");
+            return None;
+        }
+    };
+    let non_empty = |s: &Option<String>| s.clone().filter(|s| !s.trim().is_empty());
+    Some(DeltaAsset {
+        from,
+        format: non_empty(&delta.format)
+            .unwrap_or_else(|| DELTA_FORMAT_FILES_BSDIFF_V1.to_string()),
+        asset: Asset {
+            name: non_empty(&delta.name).unwrap_or_else(|| url_file_name(&delta.url)),
+            url: delta.url.clone(),
+            size: delta.size.unwrap_or(0),
+        },
+        sha256: delta.sha256.as_ref().map(|s| s.trim().to_ascii_lowercase()),
+        signature: non_empty(&delta.signature),
+        signature_url: non_empty(&delta.signature_url),
+    })
+}
+
+/// The last path segment of `url`, without query or fragment.
+fn url_file_name(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    match path.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => "update.delta".to_string(),
     }
 }
 
@@ -225,6 +278,26 @@ struct ManifestAsset {
     arch: Option<String>,
     #[serde(default)]
     format: Option<String>,
+    #[serde(default)]
+    deltas: Vec<ManifestDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestDelta {
+    from: String,
+    url: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    signature_url: Option<String>,
 }
 
 #[cfg(test)]
@@ -247,6 +320,7 @@ mod tests {
             os: Some("macos".to_string()),
             arch: Some("arm64".to_string()),
             format: Some("dmg".to_string()),
+            deltas: Vec::new(),
         };
         assert!(asset_matches(
             &asset,
@@ -325,6 +399,48 @@ mod tests {
         let source = StaticManifestSource::new("https://dl.example.com/latest.json").format("dmg");
         assert!(source.asset_patterns.is_empty());
         assert_eq!(source.format.as_deref(), Some("dmg"));
+    }
+
+    #[test]
+    fn maps_asset_deltas_and_skips_invalid_ones() {
+        let json = r#"{
+            "version": "0.8.13",
+            "assets": [{
+                "name": "OpenLogi-v0.8.13-macos-arm64.dmg",
+                "url": "https://dl.example.com/OpenLogi-v0.8.13-macos-arm64.dmg",
+                "deltas": [
+                    {
+                        "from": "v0.8.12",
+                        "url": "https://dl.example.com/v0.8.13/app.dmg.from-0.8.12.delta?x=1",
+                        "size": 1850000,
+                        "sha256": " ABC ",
+                        "signature_url": "https://dl.example.com/v0.8.13/app.dmg.from-0.8.12.delta.minisig"
+                    },
+                    {
+                        "from": "0.8.11",
+                        "name": "custom.delta",
+                        "format": "files-future-v2",
+                        "url": "https://dl.example.com/custom"
+                    },
+                    { "from": "not-semver", "url": "https://dl.example.com/bad.delta" }
+                ]
+            }]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        let deltas: Vec<_> = manifest.assets[0]
+            .deltas
+            .iter()
+            .filter_map(delta_asset)
+            .collect();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].from.to_string(), "0.8.12");
+        assert_eq!(deltas[0].format, DELTA_FORMAT_FILES_BSDIFF_V1);
+        assert_eq!(deltas[0].asset.name, "app.dmg.from-0.8.12.delta");
+        assert_eq!(deltas[0].asset.size, 1_850_000);
+        assert_eq!(deltas[0].sha256.as_deref(), Some("abc"));
+        assert!(deltas[0].signature_url.is_some());
+        assert_eq!(deltas[1].asset.name, "custom.delta");
+        assert_eq!(deltas[1].format, "files-future-v2");
     }
 
     #[test]

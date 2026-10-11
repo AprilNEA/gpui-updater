@@ -4,6 +4,10 @@ use semver::Version;
 
 use crate::error::{Error, Result};
 
+/// Format identifier of the deltas produced by the `delta` feature's
+/// `delta::create`: per-file bsdiff patches against the installed tree.
+pub const DELTA_FORMAT_FILES_BSDIFF_V1: &str = "files-bsdiff-v1";
+
 /// A downloadable file attached to a release.
 #[derive(Debug, Clone)]
 pub struct Asset {
@@ -31,6 +35,29 @@ pub struct Release {
     /// Expected lowercase hex SHA-256 of `asset`, when the source could resolve
     /// it (e.g. from a `SHA256SUMS` file).
     pub sha256: Option<String>,
+    /// Binary deltas that rebuild this release from older installed versions.
+    /// Empty when the source publishes none. Used only with the `delta` feature;
+    /// the full `asset` remains the fallback.
+    pub deltas: Vec<DeltaAsset>,
+}
+
+/// A binary delta that upgrades one specific installed version to the release
+/// it is attached to.
+#[derive(Debug, Clone)]
+pub struct DeltaAsset {
+    /// The installed version this delta applies to.
+    pub from: Version,
+    /// Delta format, e.g. [`DELTA_FORMAT_FILES_BSDIFF_V1`]. Deltas in unknown
+    /// formats are ignored.
+    pub format: String,
+    /// The delta file to download.
+    pub asset: Asset,
+    /// Expected lowercase hex SHA-256 of the delta file, when published.
+    pub sha256: Option<String>,
+    /// Inline detached minisign signature of the delta file, when published.
+    pub signature: Option<String>,
+    /// URL of a detached minisign signature of the delta file, when published.
+    pub signature_url: Option<String>,
 }
 
 /// Parse a release tag such as `v1.2.3` or `1.2.3` into a [`Version`].

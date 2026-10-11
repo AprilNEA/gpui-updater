@@ -5,11 +5,17 @@ use serde::Deserialize;
 use super::UpdateSource;
 use crate::error::{Error, Result};
 use crate::http;
-use crate::release::{Asset, Release, parse_tag};
+use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
 
 const API: &str = "https://api.github.com";
 
 /// Reads releases from a GitHub repository's Releases.
+///
+/// Binary deltas (see the `delta` feature) are discovered by name: for the
+/// selected asset `<asset>`, a release asset named `<asset>.from-<version>.delta`
+/// is a delta from `<version>`. Its checksum is read from the same checksums
+/// file and its signature from `<asset>.from-<version>.delta.minisig` (with the
+/// configured suffix). Delta files are never picked as the main asset.
 ///
 /// ```no_run
 /// use gpui_updater_core::GitHubSource;
@@ -145,25 +151,50 @@ impl UpdateSource for GitHubSource {
             size: main.size,
         };
 
-        let signature_url = self.signature_suffix.as_ref().and_then(|suffix| {
-            let want = format!("{}{suffix}", main.name);
-            release
-                .assets
-                .iter()
-                .find(|a| a.name == want)
-                .map(|a| a.browser_download_url.clone())
-        });
+        let signature_for = |name: &str| {
+            self.signature_suffix.as_ref().and_then(|suffix| {
+                let want = format!("{name}{suffix}");
+                release
+                    .assets
+                    .iter()
+                    .find(|a| a.name == want)
+                    .map(|a| a.browser_download_url.clone())
+            })
+        };
+        let signature_url = signature_for(&main.name);
 
-        let sha256 = match &self.sums_asset {
+        let sums = match &self.sums_asset {
             Some(sums_name) => match release.assets.iter().find(|a| &a.name == sums_name) {
-                Some(sums) => {
-                    let text = http::get_string(&sums.browser_download_url, &headers)?;
-                    parse_sha256_for(&text, &main.name)
-                }
+                Some(sums) => Some(http::get_string(&sums.browser_download_url, &headers)?),
                 None => None,
             },
             None => None,
         };
+        let sha256_for = |name: &str| {
+            sums.as_deref()
+                .and_then(|text| parse_sha256_for(text, name))
+        };
+        let sha256 = sha256_for(&main.name);
+
+        let deltas = release
+            .assets
+            .iter()
+            .filter_map(|a| {
+                let from = delta_from(&main.name, &a.name)?;
+                Some(DeltaAsset {
+                    from,
+                    format: DELTA_FORMAT_FILES_BSDIFF_V1.to_string(),
+                    asset: Asset {
+                        name: a.name.clone(),
+                        url: a.browser_download_url.clone(),
+                        size: a.size,
+                    },
+                    sha256: sha256_for(&a.name),
+                    signature: None,
+                    signature_url: signature_for(&a.name),
+                })
+            })
+            .collect();
 
         Ok(Release {
             version,
@@ -175,6 +206,7 @@ impl UpdateSource for GitHubSource {
             signature: None,
             signature_url,
             sha256,
+            deltas,
         })
     }
 }
@@ -196,7 +228,25 @@ fn asset_matches(name: &str, patterns: &[String]) -> bool {
 }
 
 fn select_asset<'a>(assets: &'a [GhAsset], patterns: &[String]) -> Option<&'a GhAsset> {
-    assets.iter().find(|a| asset_matches(&a.name, patterns))
+    assets
+        .iter()
+        .find(|a| !is_delta_asset(&a.name) && asset_matches(&a.name, patterns))
+}
+
+/// Delta files and their signatures, which must never be the main asset even
+/// though their names contain the main asset's name.
+fn is_delta_asset(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.rsplit('.').next() == Some("delta") || lower.contains(".delta.")
+}
+
+/// The `from` version when `candidate` is `<main>.from-<version>.delta`.
+fn delta_from(main: &str, candidate: &str) -> Option<semver::Version> {
+    let version = candidate
+        .strip_prefix(main)?
+        .strip_prefix(".from-")?
+        .strip_suffix(".delta")?;
+    parse_tag(version).ok()
 }
 
 /// Find the SHA-256 for `asset_name` in the contents of a `shasum`-style file.
@@ -293,6 +343,42 @@ mod tests {
         let picked = select_asset(&assets, &pats(&[".dmg"])).unwrap();
         assert_eq!(picked.name, "app-macos.dmg");
         assert!(select_asset(&assets, &pats(&[".exe"])).is_none());
+    }
+
+    #[test]
+    fn delta_assets_are_matched_by_name_and_never_selected_as_main() {
+        let assets = vec![
+            GhAsset {
+                name: "app-macos.dmg.from-0.8.12.delta".into(),
+                browser_download_url: "d".into(),
+                size: 10,
+            },
+            GhAsset {
+                name: "app-macos.dmg.from-0.8.12.delta.minisig".into(),
+                browser_download_url: "s".into(),
+                size: 1,
+            },
+            GhAsset {
+                name: "app-macos.dmg".into(),
+                browser_download_url: "m".into(),
+                size: 100,
+            },
+        ];
+        let picked = select_asset(&assets, &pats(&["macos", ".dmg"])).unwrap();
+        assert_eq!(picked.name, "app-macos.dmg");
+
+        assert_eq!(
+            delta_from("app-macos.dmg", "app-macos.dmg.from-0.8.12.delta").map(|v| v.to_string()),
+            Some("0.8.12".to_string())
+        );
+        assert_eq!(
+            delta_from("app-macos.dmg", "app-macos.dmg.from-v1.0.0-rc.1.delta")
+                .map(|v| v.to_string()),
+            Some("1.0.0-rc.1".to_string())
+        );
+        assert!(delta_from("app-macos.dmg", "app-macos.dmg.from-0.8.12.delta.minisig").is_none());
+        assert!(delta_from("app-macos.dmg", "app-linux.tar.gz.from-0.8.12.delta").is_none());
+        assert!(delta_from("app-macos.dmg", "app-macos.dmg.from-latest.delta").is_none());
     }
 
     #[test]
