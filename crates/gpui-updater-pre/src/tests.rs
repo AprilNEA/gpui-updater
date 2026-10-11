@@ -528,3 +528,11 @@ fn driver_events_after_drop_are_discarded(cx: &mut TestAppContext) {
     events.emit(DriverEvent::Checking);
     cx.run_until_parked();
 }
+
+#[test]
+fn entity_handle_stays_send_and_sync() {
+    // `Updater` may hold a main-thread-only driver (Sparkle's, for example), so
+    // it is neither `Send` nor `Sync`. The `Entity<Updater>` handle still is.
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Entity<Updater>>();
+}

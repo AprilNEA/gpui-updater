@@ -43,8 +43,11 @@ apps).
 
 ## Installation
 
-The breaking **0.1.0** line separates the blocking engine from two independent
-GPUI adapters. Pick the adapter matching your application's GPUI package:
+Since **0.1.0** the blocking engine is separate from two independent GPUI
+adapters. **0.2.0** adds Sparkle appcasts, Ed25519 verification, and the
+Sparkle driver, with a few breaking changes (see
+[Migrating from 0.1](#migrating-from-01)). Pick the adapter matching your
+application's GPUI package:
 
 | Package | Backend | Rust requirement |
 | --- | --- | --- |
@@ -55,23 +58,23 @@ GPUI adapters. Pick the adapter matching your application's GPUI package:
 
 Adapter requirements are conservative tested support floors, not a claim that
 older compilers necessarily fail. They do not raise the core's requirement.
-Registry dependencies for the 0.1 releases:
+Registry dependencies for the 0.2 releases:
 
 ```toml
 [dependencies]
 # Core only (blocking engine, no GPUI):
-gpui-updater-core = "0.1"
+gpui-updater-core = "0.2"
 
 # OR official GPUI (Entity<Updater>):
 gpui = "0.2.2"
-gpui-updater = "0.1"
+gpui-updater = "0.2"
 
 # OR gpui-pre (keep existing gpui_updater imports via an alias):
 gpui = { package = "gpui-pre", version = "0.3.4" }
-gpui-updater = { package = "gpui-updater-pre", version = "0.1" }
+gpui-updater = { package = "gpui-updater-pre", version = "0.2" }
 
 # Optional, next to either adapter: hand the macOS flow to Sparkle 2.
-gpui-updater-sparkle = "0.1"
+gpui-updater-sparkle = "0.2"
 ```
 
 The core and the two adapters are alternatives, not dependencies to combine;
@@ -82,20 +85,32 @@ Only the adapters export `Updater`. Without the alias, pre imports use
 `gpui_updater_pre`. Before a release is published, use the corresponding
 `crates/<package>` path from this checkout.
 
+### Migrating from 0.1
+
+- `Release`, `Asset`, and `EngineConfig` are `#[non_exhaustive]`. Build them
+  with `Release::new` / `Asset::new` / `EngineConfig::new` and the `with_*` or
+  builder methods; the fields stay public for reading and adjusting.
+  `EngineConfig` also gains `ed25519_public_key`.
+- Adapters: `Updater::restart` takes `&mut self`. It needs `Context<Self>`, so
+  it is called from `update` closures and call sites are unchanged.
+- Adapters: `Updater` is no longer `Send` or `Sync`, because it may hold a
+  main-thread-only driver such as `SparkleDriver`. `Entity<Updater>` is still
+  `Send + Sync`; only code that moves an `Updater` value itself across threads
+  is affected.
+- `Verification::Signature` and `Strict` also accept a valid Sparkle Ed25519
+  signature once `ed25519_public_key` is set. With only a minisign key
+  configured, verification behaves as before.
+
 ### Migrating from 0.0.x
 
 - Blocking consumers: replace `gpui-updater` with `gpui-updater-core` and change
   imports to `gpui_updater_core` (or retain the old import via a Cargo alias).
 - GPUI consumers: select official or pre above and remove `features = ["gpui"]`.
   `Updater::new`, `check`, `download_and_install`, `status`, `available`, and
-  `restart` retain their behavior (`restart` now takes `&mut self`; it is
-  called from `update` closures, so call sites are unchanged). No update
-  policy or polling is added.
-- `Release` and `Asset` are `#[non_exhaustive]`: build them with
-  `Release::new` / `Asset::new` and the `with_*` methods. Fields stay public
-  for reading and adjusting.
+  `restart` retain their behavior. No update policy or polling is added.
 - The adapters depend only on core, never each other. Small GPUI bindings are
   intentionally duplicated; download, verification, and install code are not.
+- Then apply [Migrating from 0.1](#migrating-from-01).
 
 Published adapters contain no baked-in Zed Git dependency. A consumer using a
 Git GPUI must patch **at its workspace root** so every dependency uses that
@@ -429,13 +444,13 @@ are compiled. Pass package names to check only those, for example
 `cargo xtask check-packages gpui-updater-core gpui-updater-pre` on a Mac
 without the Metal toolchain.
 
-Release order: publish `gpui-updater-core` 0.1.0 first; after it is available in
+Release order: publish `gpui-updater-core` 0.2.0 first; after it is available in
 the registry, publish `gpui-updater`, `gpui-updater-pre` and
-`gpui-updater-sparkle` 0.1.0. Run normal package verification again before
-publishing. A repository tag is not needed
-for registry resolution; if a coordinated release tag is created, `v0.1.0`
-should identify the reviewed workspace commit, not the old prototype. Never
-rewrite an existing release tag or embed a consumer's GPUI Git pin here.
+`gpui-updater-sparkle` 0.2.0. Run normal package verification again before
+publishing. A repository tag is not needed for registry resolution; if a
+coordinated release tag is created, `v0.2.0` should identify the published
+workspace commit. Never rewrite an existing release tag or embed a consumer's
+GPUI Git pin here.
 
 On macOS inside some Nix shells, Cargo may pick Nix's clang wrapper as `cc` and
 fail to link build scripts with missing system symbols such as `__Unwind_*` or
