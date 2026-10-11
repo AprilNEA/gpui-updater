@@ -21,18 +21,11 @@ impl UpdateSource for Source {
 }
 
 fn release(version: u64) -> Release {
-    Release {
-        version: Version::new(version, 0, 0),
-        notes: Some("fixture notes".into()),
-        asset: Asset {
-            name: "update.tar.gz".into(),
-            url: "http://unused.invalid".into(),
-            size: 0,
-        },
-        signature: None,
-        signature_url: None,
-        sha256: None,
-    }
+    Release::new(
+        Version::new(version, 0, 0),
+        Asset::new("update.tar.gz", "http://unused.invalid", 0),
+    )
+    .with_notes("fixture notes")
 }
 
 fn updater(
@@ -394,4 +387,164 @@ fn official_restart_handoff_uses_installed_path_and_skips_none_or_error() {
         )),
         UpdateStatus::Errored("install failed: fixture".into())
     );
+}
+
+/// Records the calls an `Updater` forwards; the test emits events through the
+/// handle it was started with.
+#[derive(Default)]
+struct FakeDriver {
+    events: Rc<RefCell<Option<DriverEvents>>>,
+    calls: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl UpdateDriver for FakeDriver {
+    fn start(&mut self, events: DriverEvents) {
+        *self.events.borrow_mut() = Some(events);
+        self.calls.borrow_mut().push("start");
+    }
+
+    fn check(&mut self) {
+        self.calls.borrow_mut().push("check");
+    }
+
+    fn install(&mut self) {
+        self.calls.borrow_mut().push("install");
+    }
+
+    fn relaunch(&mut self) {
+        self.calls.borrow_mut().push("relaunch");
+    }
+}
+
+type Calls = Rc<RefCell<Vec<&'static str>>>;
+
+fn driven(cx: &mut TestAppContext) -> (Entity<Updater>, DriverEvents, Calls) {
+    let driver = FakeDriver::default();
+    let (events, calls) = (driver.events.clone(), driver.calls.clone());
+    let updater = cx.new(|cx| Updater::with_driver(driver, cx));
+    let events = events.borrow().clone().unwrap();
+    (updater, events, calls)
+}
+
+#[gpui::test]
+fn driver_is_started_and_calls_are_forwarded_even_while_busy(cx: &mut TestAppContext) {
+    let (updater, events, calls) = driven(cx);
+    events.emit(DriverEvent::Checking);
+    cx.run_until_parked();
+    updater.update(cx, |u, cx| {
+        u.check(cx);
+        u.download_and_install(cx);
+        u.restart(cx);
+    });
+    assert_eq!(*calls.borrow(), ["start", "check", "install", "relaunch"]);
+    cx.read(|cx| {
+        let u = updater.read(cx);
+        assert!(u.is_driver_backed());
+        assert!(u.task.is_none());
+        assert_eq!(u.status(), &UpdateStatus::Checking);
+    });
+}
+
+#[gpui::test]
+fn driver_events_map_onto_status(cx: &mut TestAppContext) {
+    let (updater, events, _) = driven(cx);
+    let states = observe(cx, &updater);
+    for event in [
+        DriverEvent::Checking,
+        DriverEvent::Found(release(2)),
+        DriverEvent::Downloading {
+            downloaded: 0,
+            total: None,
+        },
+        DriverEvent::Installing,
+        DriverEvent::ReadyToRelaunch(Version::new(2, 0, 0)),
+        DriverEvent::Failed("fixture failure".into()),
+        DriverEvent::UpToDate,
+    ] {
+        events.emit(event);
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        *states.borrow(),
+        vec![
+            UpdateStatus::Checking,
+            UpdateStatus::Available(Version::new(2, 0, 0)),
+            UpdateStatus::Downloading {
+                downloaded: 0,
+                total: None,
+            },
+            UpdateStatus::Installing,
+            UpdateStatus::Staged(Version::new(2, 0, 0)),
+            UpdateStatus::Errored("fixture failure".into()),
+            UpdateStatus::UpToDate,
+        ]
+    );
+    // A driver's "up to date" forgets the earlier release.
+    cx.read(|cx| assert!(updater.read(cx).available().is_none()));
+}
+
+#[gpui::test]
+fn settled_returns_to_idle_or_the_known_update(cx: &mut TestAppContext) {
+    let (updater, events, _) = driven(cx);
+    let states = observe(cx, &updater);
+    for event in [
+        // Not busy: ignored.
+        DriverEvent::Settled,
+        // A check that found nothing (e.g. dismissed): back to idle.
+        DriverEvent::Checking,
+        DriverEvent::Settled,
+        // A cancelled download: the update is still available.
+        DriverEvent::Found(release(3)),
+        DriverEvent::Downloading {
+            downloaded: 0,
+            total: None,
+        },
+        DriverEvent::Settled,
+        // Not busy any more: ignored.
+        DriverEvent::Settled,
+    ] {
+        events.emit(event);
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        *states.borrow(),
+        vec![
+            UpdateStatus::Checking,
+            UpdateStatus::Idle,
+            UpdateStatus::Available(Version::new(3, 0, 0)),
+            UpdateStatus::Downloading {
+                downloaded: 0,
+                total: None,
+            },
+            UpdateStatus::Available(Version::new(3, 0, 0)),
+        ]
+    );
+}
+
+#[gpui::test]
+fn driver_mut_reaches_only_the_concrete_driver(cx: &mut TestAppContext) {
+    let (driven_updater, _, calls) = driven(cx);
+    driven_updater.update(cx, |u, _| {
+        u.driver_mut::<FakeDriver>()
+            .unwrap()
+            .calls
+            .borrow_mut()
+            .push("downcast");
+    });
+    assert_eq!(*calls.borrow(), ["start", "downcast"]);
+
+    let (engine_updater, _) = updater(cx, Vec::new(), EngineConfig::new(Version::new(1, 0, 0)));
+    engine_updater.update(cx, |u, _| {
+        assert!(!u.is_driver_backed());
+        assert!(u.driver_mut::<FakeDriver>().is_none());
+    });
+}
+
+#[gpui::test]
+fn driver_events_after_drop_are_discarded(cx: &mut TestAppContext) {
+    let (updater, events, _) = driven(cx);
+    drop(updater);
+    cx.run_until_parked();
+    events.emit(DriverEvent::Checking);
+    cx.run_until_parked();
 }

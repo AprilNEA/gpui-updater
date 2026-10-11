@@ -12,7 +12,12 @@ keywords = ["updater", "auto-update", "self-update", "desktop"]
 categories = ["development-tools"]
 
 [dependencies]
+base64 = "0.22"
+# Pure-Rust Ed25519, used to verify Sparkle's `sparkle:edSignature`. No default
+# features: verification needs neither key generation nor PEM support.
+ed25519-compact = { version = "2.1", default-features = false }
 minisign-verify = "0.2.5"
+roxmltree = "0.20"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

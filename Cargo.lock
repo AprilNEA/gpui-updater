@@ -1654,6 +1654,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2706,6 +2712,7 @@ checksum = "70a09e0bf58aede45b8e7eed6e8d5d6552381c431014d62b349b0133008737bd"
 name = "gpui-updater"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui",
  "gpui-updater-core",
  "tempfile",
@@ -2715,7 +2722,10 @@ dependencies = [
 name = "gpui-updater-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "ed25519-compact",
  "minisign-verify",
+ "roxmltree 0.20.0",
  "semver",
  "serde",
  "serde_json",
@@ -2730,9 +2740,22 @@ dependencies = [
 name = "gpui-updater-pre"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui-pre",
  "gpui-updater-core",
  "tempfile",
+]
+
+[[package]]
+name = "gpui-updater-sparkle"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "gpui-updater-core",
+ "objc2",
+ "objc2-foundation",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -6220,6 +6243,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8181,6 +8214,17 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
+name = "xtask"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "tar",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+]
 
 [[package]]
 name = "y4m"

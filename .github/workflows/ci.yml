@@ -25,9 +25,10 @@ jobs:
 
   # Clippy on every OS so each platform's install strategy
   # (install/{linux,macos,windows}.rs) is lint-gated — a `cfg`-gated module is
-  # invisible to clippy run on a different host.
+  # invisible to clippy run on a different host. The same holds for the Sparkle
+  # driver: its Objective-C glue on macOS, its stub elsewhere.
   clippy:
-    name: clippy core (${{ matrix.os }})
+    name: clippy core + sparkle (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -41,12 +42,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p gpui-updater-core --all-targets --locked -- -D warnings
       - run: cargo doc -p gpui-updater-core --no-deps --locked
+      - run: cargo clippy -p gpui-updater-sparkle --all-targets --locked -- -D warnings
+      - run: cargo doc -p gpui-updater-sparkle --no-deps --locked
 
   # Core builds and tests at its own MSRV without GPUI. Running the
   # suite on every OS also compiles that platform's install strategy
-  # (install/macos.rs, install/linux.rs, install/windows.rs).
+  # (install/macos.rs, install/linux.rs, install/windows.rs). The Sparkle
+  # driver shares the MSRV; on macOS its `load_unbundled` test runs on the real
+  # main thread.
   test:
-    name: core MSRV tests (${{ matrix.os }})
+    name: core + sparkle MSRV tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +63,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p gpui-updater-core --all-targets --locked
       - run: cargo test -p gpui-updater-core --doc --locked
+      - run: cargo test -p gpui-updater-sparkle --all-targets --locked
 
   # Independent builds prevent workspace feature unification from concealing
   # a dependency on the other backend. Native app coverage stays with consumers.
@@ -85,12 +91,26 @@ jobs:
       - run: cargo test -p ${{ matrix.package }} --doc --locked
       - run: cargo doc -p ${{ matrix.package }} --no-deps --locked
 
+  # Drives the Sparkle driver against the real Sparkle.framework: builds the
+  # smoke example into throwaway app bundles and checks the events it reports
+  # for a local fixture feed.
+  sparkle:
+    name: sparkle smoke (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: crates/gpui-updater-sparkle/scripts/smoke.sh
+
   packages:
     name: extracted package consumers and dependency isolation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: |
           sudo apt-get update
@@ -98,4 +118,6 @@ jobs:
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
-      - run: bash scripts/check-packages.sh
+      - run: cargo clippy -p xtask --all-targets --locked -- -D warnings
+      - run: cargo test -p xtask --locked
+      - run: cargo xtask check-packages

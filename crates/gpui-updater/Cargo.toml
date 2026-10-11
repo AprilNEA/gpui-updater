@@ -12,6 +12,9 @@ keywords = ["gpui", "updater", "auto-update", "desktop"]
 categories = ["gui", "development-tools"]
 
 [dependencies]
+# Carries `DriverEvent`s from an external update driver onto the GPUI
+# foreground. GPUI already depends on `futures`.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 gpui-updater-core = { version = "0.1.0", path = "../gpui-updater-core" }
 gpui = { version = "0.2.2", default-features = false }
 

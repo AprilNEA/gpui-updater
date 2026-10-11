@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Repository maintenance tasks for gpui-updater, run as `cargo xtask <task>`."
+
+[dependencies]
+anyhow = "1"
+# Unpacks the `.crate` archives that `cargo package` writes. No default features
+# for `tar`: extended attributes do not matter here, and its `xattr` feature
+# would compile the same xattr crate this task works around (see
+# `check_packages::needs_libc_hold`).
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+tempfile = "3"
+toml = "1"
+
+[lints]
+workspace = true

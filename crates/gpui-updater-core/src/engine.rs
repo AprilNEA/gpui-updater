@@ -14,6 +14,12 @@ use crate::{http, verify};
 /// How strictly [`UpdateEngine`] enforces integrity and authenticity checks on
 /// a release.
 ///
+/// A "signature" is either a minisign signature (checked against
+/// [`EngineConfig::minisign_public_key`]) or a Sparkle-style Ed25519
+/// signature (checked against [`EngineConfig::ed25519_public_key`]). Every
+/// signature the release publishes *and* a configured key can check is
+/// verified, and any mismatch fails the download.
+///
 /// The default, [`BestEffort`](Verification::BestEffort), verifies whatever the
 /// release provides and *skips* a check when its input is absent — so an
 /// unsigned release installs with only a checksum, or with nothing. The
@@ -35,11 +41,11 @@ pub enum Verification {
     /// Require a matching SHA-256. Fails closed when the release publishes no
     /// checksum. A signature is still verified when one is available.
     Checksum,
-    /// Require a valid minisign signature: a public key must be configured and
-    /// the release must publish a signature. A checksum is still verified when
-    /// available, but is not itself required.
+    /// Require a valid signature: the release must publish a minisign or
+    /// Ed25519 signature for which a public key is configured. A checksum is
+    /// still verified when available, but is not itself required.
     Signature,
-    /// Require both a valid minisign signature and a matching SHA-256.
+    /// Require both a valid signature and a matching SHA-256.
     Strict,
 }
 
@@ -64,6 +70,11 @@ pub struct EngineConfig {
     /// Base64 minisign public key. When set and the release publishes a
     /// `.minisig`, the download is signature-checked in addition to SHA-256.
     pub minisign_public_key: Option<String>,
+    /// Base64 Ed25519 public key in Sparkle's format (the `SUPublicEDKey`
+    /// value printed by Sparkle's `generate_keys`). When set and the release
+    /// publishes an [`ed25519_signature`](Release::ed25519_signature), the
+    /// download is signature-checked.
+    pub ed25519_public_key: Option<String>,
     /// How strictly downloads are verified. See [`Verification`].
     pub verification: Verification,
     /// Where to install. Defaults to [`install::current_install_root`].
@@ -78,6 +89,7 @@ impl EngineConfig {
         Self {
             current_version,
             minisign_public_key: None,
+            ed25519_public_key: None,
             verification: Verification::default(),
             install_root: None,
             download_dir: None,
@@ -88,6 +100,14 @@ impl EngineConfig {
     #[must_use]
     pub fn minisign_public_key(mut self, key: impl Into<String>) -> Self {
         self.minisign_public_key = Some(key.into());
+        self
+    }
+
+    /// Set the base64 Ed25519 public key (Sparkle's `SUPublicEDKey`) used to
+    /// verify `sparkle:edSignature` signatures.
+    #[must_use]
+    pub fn ed25519_public_key(mut self, key: impl Into<String>) -> Self {
+        self.ed25519_public_key = Some(key.into());
         self
     }
 
@@ -108,17 +128,14 @@ impl EngineConfig {
     /// fails to fetch or yields an invalid signature — those are caught when the
     /// download is verified.
     fn precheck(&self, release: &Release) -> Result<()> {
-        if self.verification.requires_signature() {
-            if self.minisign_public_key.is_none() {
-                return Err(Error::VerificationRequired(
-                    "policy requires a minisign signature, but no public key is configured".into(),
-                ));
-            }
-            if !release_has_signature(release) {
-                return Err(Error::VerificationRequired(
-                    "policy requires a minisign signature, but the release publishes none".into(),
-                ));
-            }
+        if self.verification.requires_signature() && !self.can_verify_signature_of(release) {
+            let reason = if self.minisign_public_key.is_none() && self.ed25519_public_key.is_none()
+            {
+                "policy requires a signature, but no minisign or Ed25519 public key is configured"
+            } else {
+                "policy requires a signature, but the release publishes none that a configured key can verify"
+            };
+            return Err(Error::VerificationRequired(reason.into()));
         }
         if self.verification.requires_checksum() && non_empty(release.sha256.as_deref()).is_none() {
             return Err(Error::VerificationRequired(
@@ -126,6 +143,15 @@ impl EngineConfig {
             ));
         }
         Ok(())
+    }
+
+    /// Whether at least one signature the release advertises has a matching
+    /// configured key.
+    fn can_verify_signature_of(&self, release: &Release) -> bool {
+        let minisign = self.minisign_public_key.is_some() && release_has_minisign(release);
+        let ed25519 = self.ed25519_public_key.is_some()
+            && non_empty(release.ed25519_signature.as_deref()).is_some();
+        minisign || ed25519
     }
 
     /// Override the install location (defaults to the running app/bundle).
@@ -220,20 +246,27 @@ impl<S: UpdateSource> UpdateEngine<S> {
         if let Some(expected) = non_empty(release.sha256.as_deref()) {
             verify::verify_sha256(artifact, expected)?;
         }
+        let mut verified_signature = false;
+        if let (Some(key), Some(signature)) = (
+            &self.config.ed25519_public_key,
+            non_empty(release.ed25519_signature.as_deref()),
+        ) {
+            verify::verify_ed25519(artifact, key, signature)?;
+            verified_signature = true;
+        }
         if let Some(key) = &self.config.minisign_public_key {
-            match resolve_signature(release)? {
-                Some(signature) => verify::verify_minisign(artifact, key, &signature)?,
-                // `precheck` already accepted a non-empty `signature_url`, but the
-                // fetched body turned out blank. Fail closed instead of relying on
-                // the verifier to reject an empty signature string.
-                None if policy.requires_signature() => {
-                    return Err(Error::VerificationRequired(
-                        "policy requires a minisign signature, but the published signature is empty"
-                            .into(),
-                    ));
-                }
-                None => {}
+            if let Some(signature) = resolve_minisign(release)? {
+                verify::verify_minisign(artifact, key, &signature)?;
+                verified_signature = true;
             }
+        }
+        // `precheck` may have accepted a non-empty `signature_url` whose fetched
+        // body turned out blank. Fail closed instead of relying on a verifier to
+        // reject an empty signature string.
+        if policy.requires_signature() && !verified_signature {
+            return Err(Error::VerificationRequired(
+                "policy requires a signature, but the published signature is empty".into(),
+            ));
         }
         Ok(())
     }
@@ -278,7 +311,7 @@ fn non_empty(s: Option<&str>) -> Option<&str> {
 }
 
 /// Whether the release advertises a minisign signature, inline or by URL.
-fn release_has_signature(release: &Release) -> bool {
+fn release_has_minisign(release: &Release) -> bool {
     non_empty(release.signature.as_deref()).is_some()
         || non_empty(release.signature_url.as_deref()).is_some()
 }
@@ -286,7 +319,7 @@ fn release_has_signature(release: &Release) -> bool {
 /// The minisign signature for a release: the inline value if present, otherwise
 /// fetched from `signature_url`. `None` when the release advertises neither, or
 /// when a fetched signature body is blank.
-fn resolve_signature(release: &Release) -> Result<Option<String>> {
+fn resolve_minisign(release: &Release) -> Result<Option<String>> {
     if let Some(signature) = non_empty(release.signature.as_deref()) {
         return Ok(Some(signature.to_string()));
     }
@@ -308,18 +341,18 @@ mod tests {
         signature: Option<&str>,
         signature_url: Option<&str>,
     ) -> Release {
-        Release {
-            version: Version::new(1, 0, 0),
-            notes: None,
-            asset: Asset {
-                name: "app.dmg".to_string(),
-                url: "https://example.test/app.dmg".to_string(),
-                size: 0,
-            },
-            signature: signature.map(str::to_string),
-            signature_url: signature_url.map(str::to_string),
-            sha256: sha256.map(str::to_string),
-        }
+        let mut release = Release::new(
+            Version::new(1, 0, 0),
+            Asset::new("app.dmg", "https://example.test/app.dmg", 0),
+        );
+        release.signature = signature.map(str::to_string);
+        release.signature_url = signature_url.map(str::to_string);
+        release.sha256 = sha256.map(str::to_string);
+        release
+    }
+
+    fn ed25519_release(signature: &str) -> Release {
+        release(None, None, None).with_ed25519_signature(signature)
     }
 
     fn config(verification: Verification, key: Option<&str>) -> EngineConfig {
@@ -402,6 +435,50 @@ mod tests {
             cfg.precheck(&release(Some("abc"), Some("sig"), None))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn signature_policy_accepts_an_ed25519_signature_with_its_key() {
+        let cfg = config(Verification::Signature, None).ed25519_public_key("edkey");
+        assert!(cfg.precheck(&ed25519_release("edsig")).is_ok());
+        // A blank Ed25519 signature counts as absent.
+        assert!(matches!(
+            cfg.precheck(&ed25519_release("  ")),
+            Err(Error::VerificationRequired(_))
+        ));
+    }
+
+    #[test]
+    fn signature_policy_needs_a_key_for_the_published_signature_kind() {
+        // Only a minisign key, but the release is signed with Ed25519 alone.
+        let cfg = config(Verification::Signature, Some("pubkey"));
+        assert!(matches!(
+            cfg.precheck(&ed25519_release("edsig")),
+            Err(Error::VerificationRequired(_))
+        ));
+        // Only an Ed25519 key, but the release is signed with minisign alone.
+        let cfg = config(Verification::Signature, None).ed25519_public_key("edkey");
+        assert!(matches!(
+            cfg.precheck(&release(None, Some("sig"), None)),
+            Err(Error::VerificationRequired(_))
+        ));
+    }
+
+    #[test]
+    fn verifies_ed25519_signed_artifacts_and_rejects_tampering() {
+        let fixture = crate::verify::test_support::Ed25519Fixture::new(b"update payload");
+        let engine = UpdateEngine::new(
+            PanicSource,
+            config(Verification::Signature, None).ed25519_public_key(&fixture.public_key),
+        );
+        let signed = ed25519_release(&fixture.signature);
+        assert!(engine.verify_artifact(&fixture.path, &signed).is_ok());
+
+        std::fs::write(&fixture.path, b"update payloaD").unwrap();
+        assert!(matches!(
+            engine.verify_artifact(&fixture.path, &signed),
+            Err(Error::Signature(_))
+        ));
     }
 
     #[test]

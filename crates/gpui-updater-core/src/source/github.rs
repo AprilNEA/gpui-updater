@@ -175,6 +175,7 @@ impl UpdateSource for GitHubSource {
             signature: None,
             signature_url,
             sha256,
+            ed25519_signature: None,
         })
     }
 }

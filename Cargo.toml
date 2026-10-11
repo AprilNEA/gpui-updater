@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/gpui-updater-core", "crates/gpui-updater", "crates/gpui-updater-pre"]
+members = [
+    "crates/gpui-updater-core",
+    "crates/gpui-updater",
+    "crates/gpui-updater-pre",
+    "crates/gpui-updater-sparkle",
+    "xtask",
+]
 default-members = ["crates/gpui-updater-core"]
 resolver = "3"
 
