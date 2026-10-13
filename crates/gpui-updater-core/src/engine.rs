@@ -1,5 +1,6 @@
 //! The blocking update orchestrator that ties the pieces together.
 
+mod artifact;
 mod config;
 #[cfg(all(test, feature = "delta", any(target_os = "macos", target_os = "linux")))]
 mod delta_tests;
@@ -10,13 +11,14 @@ mod payload;
 mod tests;
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use semver::Version;
 
+pub use artifact::Artifact;
 use config::Integrity;
 pub use config::{
-    BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, EngineConfig, Verification, VersionBinding,
+    BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, DEFAULT_MAX_DOWNLOAD_SIZE, EngineConfig,
+    Verification, VersionBinding,
 };
 
 use crate::error::Result;
@@ -24,6 +26,7 @@ use crate::http::{self, Fetch};
 use crate::install::{self, Installed};
 use crate::release::Release;
 use crate::source::UpdateSource;
+use crate::staging;
 
 /// Blocking update orchestrator: check → download → verify → install.
 ///
@@ -48,11 +51,16 @@ impl<S: UpdateSource> UpdateEngine<S> {
     /// current version (otherwise `Ok(None)`).
     ///
     /// # Errors
-    /// Propagates source/network/parse errors.
+    /// Propagates source/network/parse errors. A newer release is rejected
+    /// instead of returned when the [`Verification`] policy cannot be met
+    /// ([`Error::VerificationRequired`](crate::Error::VerificationRequired)),
+    /// or when its artifact or signature would not be fetched over HTTPS
+    /// ([`Error::InsecureUrl`](crate::Error::InsecureUrl)).
     pub fn check(&self) -> Result<Option<Release>> {
         let latest = self.source.fetch_latest()?;
         if latest.version > self.config.current_version {
             self.config.precheck(&latest)?;
+            ensure_fetchable(&latest)?;
             Ok(Some(latest))
         } else {
             Ok(None)
@@ -60,10 +68,13 @@ impl<S: UpdateSource> UpdateEngine<S> {
     }
 
     /// Download the update and verify it according to the configured
-    /// policies. Returns the path to hand to [`install`](Self::install).
+    /// policies. Returns the [`Artifact`] to hand to [`install`](Self::install).
     ///
-    /// A download larger than the size the release publishes is cut off. The
-    /// file is then checked against its SHA-256 and minisign signature (see
+    /// Files are fetched over HTTPS only, into a fresh directory that only the
+    /// current user can access (or [`EngineConfig::download_dir`]). A download
+    /// larger than the size the release publishes, or than
+    /// [`EngineConfig::max_download_size`], is cut off. The file is then
+    /// checked against its SHA-256 and minisign signature (see
     /// [`Verification`] and [`VersionBinding`]), and on macOS the app inside
     /// must declare the release version and carry the expected code signature
     /// (see [`BundleVersion`] and [`CodeSigning`]).
@@ -89,25 +100,28 @@ impl<S: UpdateSource> UpdateEngine<S> {
         &self,
         release: &Release,
         mut progress: impl FnMut(u64, Option<u64>),
-    ) -> Result<PathBuf> {
+    ) -> Result<Artifact> {
         let dir = self.download_dir()?;
         #[cfg(feature = "delta")]
         if let Some(rebuilt) = self.try_deltas(release, &dir, &mut progress) {
             match self.check_payload(&rebuilt, release) {
-                Ok(()) => return Ok(rebuilt),
+                Ok(()) => return Ok(Artifact::verified(rebuilt)),
                 Err(e) => {
                     tracing::warn!(error = %e, "rebuilt update rejected; falling back to the full download");
                     let _ = std::fs::remove_dir_all(&rebuilt);
                 }
             }
         }
-        let artifact = dir.join(&release.asset.name);
-        let fetch = Fetch::new(&release.asset.url).expect_len(release.asset.size);
+        // The name comes from release metadata; keep the file inside `dir`.
+        let artifact = dir.join(staging::safe_file_name(&release.asset.name, "update"));
+        let fetch = Fetch::new(&release.asset.url)
+            .expect_len(release.asset.size)
+            .max_len(self.config.max_download_size);
         http::download(&fetch, &artifact, &mut progress)?;
         self.config
             .verify_file(&artifact, Integrity::of_release(release), &release.version)?;
         self.check_payload(&artifact, release)?;
-        Ok(artifact)
+        Ok(Artifact::verified(artifact))
     }
 
     /// Check the app inside a verified artifact before it is offered for
@@ -131,10 +145,10 @@ impl<S: UpdateSource> UpdateEngine<S> {
     fn download_dir(&self) -> Result<PathBuf> {
         match &self.config.download_dir {
             Some(dir) => {
-                std::fs::create_dir_all(dir)?;
+                staging::ensure_private_dir(dir)?;
                 Ok(dir.clone())
             }
-            None => default_download_dir(),
+            None => Ok(staging::private_temp_dir("gpui-updater")?),
         }
     }
 
@@ -147,10 +161,14 @@ impl<S: UpdateSource> UpdateEngine<S> {
 
     /// Install a downloaded artifact over the configured install root.
     ///
+    /// Only an [`Artifact`] returned by [`download`](Self::download) is
+    /// accepted, so nothing reaches the installer without passing the
+    /// engine's checks.
+    ///
     /// # Errors
     /// Propagates install failures.
-    pub fn install(&self, artifact: &Path) -> Result<Installed> {
-        install::install(artifact, &self.install_root()?)
+    pub fn install(&self, artifact: &Artifact) -> Result<Installed> {
+        install::install(artifact.path(), &self.install_root()?)
     }
 
     /// Run the full pipeline. Returns `Ok(None)` when already up to date.
@@ -166,11 +184,17 @@ impl<S: UpdateSource> UpdateEngine<S> {
     }
 }
 
-fn default_download_dir() -> Result<PathBuf> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("gpui-updater-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+/// Fail when the release's artifact or detached signature would not be
+/// fetched over HTTPS, so such a release is never offered as available.
+fn ensure_fetchable(release: &Release) -> Result<()> {
+    http::ensure_secure(&release.asset.url)?;
+    match release
+        .signature_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => http::ensure_secure(url),
+        None => Ok(()),
+    }
 }

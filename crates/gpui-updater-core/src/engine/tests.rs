@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used, reason = "tests")]
 
+use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
+
 use super::*;
 use crate::error::Error;
 use crate::release::Asset;
@@ -309,4 +312,90 @@ impl UpdateSource for PanicSource {
     fn fetch_latest(&self) -> Result<Release> {
         unreachable!("policy tests do not fetch")
     }
+}
+
+/// A source that always offers the same release.
+struct FixedSource(Release);
+
+impl UpdateSource for FixedSource {
+    fn fetch_latest(&self) -> Result<Release> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Serve `body` to every request on a loopback port, returning its URL.
+fn serve(body: &'static [u8]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+        }
+    });
+    format!("http://{addr}/download")
+}
+
+#[test]
+fn check_refuses_releases_fetched_without_https() {
+    let check = |release: Release| {
+        UpdateEngine::new(FixedSource(release), config(Verification::BestEffort, None)).check()
+    };
+    let mut plain = release(None, None, None);
+    plain.asset.url = "http://example.com/app.dmg".into();
+    assert!(matches!(check(plain), Err(Error::InsecureUrl(_))));
+    let plain_signature = release(None, None, Some("http://example.com/app.dmg.minisig"));
+    assert!(matches!(check(plain_signature), Err(Error::InsecureUrl(_))));
+    assert!(check(release(None, None, None)).unwrap().is_some());
+}
+
+#[test]
+fn keeps_hostile_asset_names_inside_the_download_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = dir.path().join("downloads");
+    let outside = dir.path().join("escaped.dmg");
+    let url = serve(b"artifact");
+    let engine = UpdateEngine::new(
+        PanicSource,
+        config(Verification::Off, None).download_dir(&downloads),
+    );
+    for name in ["../escaped.dmg".to_string(), outside.display().to_string()] {
+        let mut hostile = release(None, None, None);
+        hostile.asset = Asset::new(name.as_str(), url.as_str(), 0);
+        let artifact = engine.download(&hostile, |_, _| {}).unwrap();
+        assert_eq!(artifact.path(), downloads.join("escaped.dmg"), "{name}");
+        assert!(!outside.exists(), "{name} escaped the download directory");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn download_dirs_are_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |dir: &Path| std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+
+    let engine = UpdateEngine::new(PanicSource, config(Verification::Off, None));
+    let (first, second) = (
+        engine.download_dir().unwrap(),
+        engine.download_dir().unwrap(),
+    );
+    assert_ne!(first, second, "each download gets a fresh directory");
+    assert_eq!(mode(&first), 0o700);
+    std::fs::remove_dir(first).unwrap();
+    std::fs::remove_dir(second).unwrap();
+
+    let parent = tempfile::tempdir().unwrap();
+    let custom = parent.path().join("updates/cache");
+    let engine = UpdateEngine::new(
+        PanicSource,
+        config(Verification::Off, None).download_dir(&custom),
+    );
+    assert_eq!(engine.download_dir().unwrap(), custom);
+    assert_eq!(mode(&custom), 0o700);
+    assert_eq!(mode(&parent.path().join("updates")), 0o700);
 }

@@ -24,8 +24,10 @@ apps).
   signatures, with minisign key rotation and signatures bound to a version. On
   macOS the new `.app` must declare the release version and carry the
   installed app's code-signing team. Static manifests can be signed and expire,
-  so a stale one cannot be replayed. Transport security alone is not trusted.
-  See [Verification and trust](#verification-and-trust).
+  so a stale one cannot be replayed. Everything is fetched over HTTPS with
+  bounded sizes into a directory only the current user can access, but
+  transport security alone is not trusted. See
+  [Verification and trust](#verification-and-trust).
 - **Delta updates** (optional `delta` feature) — download small per-file
   patches instead of the full artifact (chained across several releases when
   needed) and rebuild the new `.app` bundle or executable from the installed
@@ -102,10 +104,26 @@ Only the adapters export `Updater`. Without the alias, pre imports use
   the release version, and when the installed app is signed by a team, the
   update must be validly signed by the same team. Opt out with
   `.bundle_version(BundleVersion::Ignore)` or `.code_signing(CodeSigning::Off)`.
+- `UpdateEngine::download` returns an `Artifact` instead of a `PathBuf`, and
+  `UpdateEngine::install` takes `&Artifact`, so the engine only installs a file
+  it downloaded and checked. Read the location with `artifact.path()`; call
+  `install::install` directly to install some other file on purpose.
+- Every request, and every redirect it follows, must use HTTPS. A plain
+  `http://` URL fails with `Error::InsecureUrl`, and `check()` rejects a
+  release whose artifact or `signature_url` is not HTTPS. Plain HTTP still
+  works for loopback hosts (`localhost`, `127.0.0.1`, `[::1]`), for local
+  testing.
 - A download is cut off once it exceeds the size the release publishes
-  (GitHub always publishes one).
+  (GitHub always publishes one) or, without one,
+  `EngineConfig::max_download_size` (4 GiB by default). Manifests, appcasts,
+  and GitHub API responses are limited to 10 MiB, signature and checksums
+  files to 1 MiB.
+- The default download directory is created fresh with owner-only permissions
+  (`0700` on Unix), and so is a configured `download_dir` the engine has to
+  create. Asset names from release metadata are reduced to a plain file name,
+  so a name such as `../x` cannot place the download outside that directory.
 - `Release` gains `deltas` (build it with `Release::new` / `with_deltas`), and
-  `Error` gains `Payload`, `ManifestExpired`, and `Delta`.
+  `Error` gains `Payload`, `ManifestExpired`, `Delta`, and `InsecureUrl`.
 
 ### Migrating from 0.1
 
@@ -295,12 +313,22 @@ For R2/S3-style hosting, the recommended release flow is:
 
 ### Verification and trust
 
+**Transport and staging.** Every request, including each redirect it
+follows, must use HTTPS; plain HTTP is accepted only for loopback hosts, for
+local testing. Downloads land in a fresh directory that only the current user
+can access, under a file name reduced to its last path component, and
+`UpdateEngine::install` accepts only the `Artifact` that `download` returns,
+so nothing reaches the installer without passing the checks below. HTTPS
+protects the transfer; whether the file is trusted is decided by those checks.
+
 Every downloaded file, the full artifact or a delta, goes through the same
 checks, in this order:
 
 1. **Size.** When the release publishes one (`size` in a manifest; GitHub
    always does), a response announcing another size is rejected and a body
-   growing past it is cut off, so a hostile mirror cannot fill the disk.
+   growing past it is cut off. Without a published size, the body is cut off
+   at `EngineConfig::max_download_size` (4 GiB by default). Either way a
+   hostile mirror cannot fill the disk.
 2. **SHA-256** against the inline `sha256` or the release's checksums file.
 3. **Signatures.** A minisign signature (inline `signature`, else
    `signature_url`) made by any configured public key, and a Sparkle-style
@@ -348,6 +376,10 @@ EngineConfig::new(current_version)
 Under `Signature`/`Strict`, a release that cannot be verified is rejected at
 `check()` time — before it is ever surfaced as available — and again before a
 download is verified.
+
+For the strongest setup, combine `Verification::Strict`, a `version:` token in
+every signature with `VersionBinding::Required`, and, for static manifests, a
+signed manifest with `expires` (see *Signed manifests* below).
 
 **Key rotation.** Call `minisign_public_key` more than once: a signature by
 any configured key is accepted. Ship a release that trusts both the old and

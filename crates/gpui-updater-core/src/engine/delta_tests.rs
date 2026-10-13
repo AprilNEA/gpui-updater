@@ -214,7 +214,8 @@ impl Fixture {
         self.dir.path().join("downloads")
     }
 
-    fn assert_rebuilt(&self, out: &Path, version: &str) {
+    fn assert_rebuilt(&self, out: impl AsRef<Path>, version: &str) {
+        let out = out.as_ref();
         for rel in ["Contents/MacOS/demo", "Contents/Info.plist"] {
             assert_eq!(
                 fs::read(out.join("Demo.app").join(rel)).unwrap(),
@@ -224,7 +225,8 @@ impl Fixture {
         }
     }
 
-    fn assert_full(&self, out: &Path) {
+    fn assert_full(&self, out: impl AsRef<Path>) {
+        let out = out.as_ref();
         assert_eq!(out, self.downloads().join("Demo.dmg"));
         assert_eq!(fs::read(out).unwrap(), full());
         let leftovers: Vec<_> = fs::read_dir(self.downloads())
@@ -245,7 +247,7 @@ fn rebuilds_from_a_matching_delta() {
         .engine(Verification::BestEffort)
         .download(&release, |_, total| totals.push(total))
         .unwrap();
-    assert_eq!(out, fx.downloads().join("delta-1.1.0"));
+    assert_eq!(out.path(), fx.downloads().join("delta-1.1.0"));
     fx.assert_rebuilt(&out, "1.1.0");
     assert_eq!(fx.server.hits(), ["/d/1.0.0-1.1.0"]);
     assert!(totals.iter().all(Option::is_some));
@@ -267,7 +269,7 @@ fn chains_deltas_when_none_starts_at_the_installed_version() {
         .engine(Verification::Checksum)
         .download(&release, |got, total| seen.push((got, total)))
         .unwrap();
-    assert_eq!(out, fx.downloads().join("delta-1.2.0"));
+    assert_eq!(out.path(), fx.downloads().join("delta-1.2.0"));
     fx.assert_rebuilt(&out, "1.2.0");
     assert_eq!(fx.server.hits(), ["/d/1.0.0-1.1.0", "/d/1.1.0-1.2.0"]);
     // Progress spans the whole chain, and the intermediate tree is gone.

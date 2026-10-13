@@ -3,7 +3,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Installed;
 use crate::error::{Error, Result};
@@ -100,7 +99,7 @@ struct Mount {
 
 impl Mount {
     fn attach(dmg: &Path) -> Result<Self> {
-        let dir = unique_temp_dir("gpui-updater-dmg")?;
+        let dir = crate::staging::private_temp_dir("gpui-updater-dmg")?;
         let out = Command::new("hdiutil")
             .args([
                 "attach",
@@ -158,19 +157,11 @@ fn ditto(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{bundle_root, install, unique_temp_dir};
+    use super::{bundle_root, install};
     use crate::error::Error;
+    use crate::staging::private_temp_dir;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -191,7 +182,7 @@ mod tests {
 
     #[test]
     fn install_restart_path_is_the_app_bundle_root() {
-        let work = unique_temp_dir("gpui-updater-test").unwrap();
+        let work = private_temp_dir("gpui-updater-test").unwrap();
         let payload = work.join("payload");
         fs::create_dir_all(payload.join("Demo.app/Contents/MacOS")).unwrap();
         fs::write(payload.join("Demo.app/Contents/MacOS/demo"), "new").unwrap();
@@ -219,7 +210,7 @@ mod tests {
 
     #[test]
     fn installs_an_unpacked_payload_directory() {
-        let work = unique_temp_dir("gpui-updater-test").unwrap();
+        let work = private_temp_dir("gpui-updater-test").unwrap();
         let payload = work.join("rebuilt");
         fs::create_dir_all(payload.join("Demo.app/Contents/MacOS")).unwrap();
         fs::write(payload.join("Demo.app/Contents/MacOS/demo"), "rebuilt").unwrap();
