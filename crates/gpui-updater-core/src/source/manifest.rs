@@ -4,13 +4,19 @@
 //! `MinIO`, Backblaze B2, GitHub Pages, GitHub Releases, or a normal static web
 //! server. It does not speak the S3 API; the updater only needs a static JSON
 //! document plus direct artifact URLs.
+//!
+//! Each asset may list binary deltas from older versions under `deltas`; see
+//! [`StaticManifestSource`].
 
+use std::time::SystemTime;
+
+use semver::Version;
 use serde::Deserialize;
 
-use super::UpdateSource;
+use super::{UpdateSource, trust};
 use crate::error::{Error, Result};
 use crate::http;
-use crate::release::{Asset, Release, parse_tag};
+use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
 
 /// Reads release metadata from a static JSON manifest.
 ///
@@ -26,6 +32,22 @@ use crate::release::{Asset, Release, parse_tag};
 /// an `ed25519_signature` (base64, in the format Sparkle's `sign_update`
 /// prints), so one release pipeline can sign for this manifest and a Sparkle
 /// appcast with the same key.
+///
+/// An asset can also carry `deltas`: binary deltas that rebuild it from an
+/// older installed version (see the `delta` feature). Each needs `from` and
+/// `url`; `name`, `format` (default `files-bsdiff-v1`), `size`, `sha256`,
+/// `signature`, and `signature_url` are optional and mean the same as on the
+/// asset. An entry whose `from` is not valid semver is ignored.
+///
+/// ```json
+/// "deltas": [{
+///   "from": "0.8.12",
+///   "url": "https://dl.example.com/v0.8.13/OpenLogi-macos-arm64.dmg.from-0.8.12.delta",
+///   "size": 1850000,
+///   "sha256": "…",
+///   "signature_url": "https://dl.example.com/v0.8.13/OpenLogi-macos-arm64.dmg.from-0.8.12.delta.minisig"
+/// }]
+/// ```
 ///
 /// ```no_run
 /// use gpui_updater_core::StaticManifestSource;
@@ -46,6 +68,11 @@ pub struct StaticManifestSource {
     arch: Option<String>,
     /// Optional exact match against the asset's `format` field.
     format: Option<String>,
+    /// Base64 minisign keys the manifest must be signed by; empty means the
+    /// manifest is not verified.
+    keys: Vec<String>,
+    /// Where the manifest's signature lives; defaults to `<url>.minisig`.
+    signature_url: Option<String>,
 }
 
 impl StaticManifestSource {
@@ -58,7 +85,24 @@ impl StaticManifestSource {
             os: None,
             arch: None,
             format: None,
+            keys: Vec::new(),
+            signature_url: None,
         }
+    }
+
+    /// Require the manifest to be signed by this base64 minisign public key.
+    /// Call again to accept several, for example while rotating keys.
+    #[must_use]
+    pub fn minisign_public_key(mut self, key: impl Into<String>) -> Self {
+        self.keys.push(key.into());
+        self
+    }
+
+    /// Fetch the manifest's signature from `url` instead of `<url>.minisig`.
+    #[must_use]
+    pub fn signature_url(mut self, url: impl Into<String>) -> Self {
+        self.signature_url = Some(url.into());
+        self
     }
 
     /// Require the selected asset's name to contain `substr` (case-insensitive).
@@ -117,8 +161,11 @@ impl StaticManifestSource {
 
 impl UpdateSource for StaticManifestSource {
     fn fetch_latest(&self) -> Result<Release> {
-        let manifest: Manifest = http::get_json(&self.url, &[])?;
+        let manifest = self.fetch_manifest()?;
         manifest.validate_schema_version()?;
+        if let Some(expires) = manifest.expires.as_deref().filter(|s| !s.trim().is_empty()) {
+            trust::check_expiry(expires, SystemTime::now())?;
+        }
         let version = parse_tag(&manifest.version)?;
         let selector = AssetSelector {
             name_patterns: &self.asset_patterns,
@@ -131,6 +178,11 @@ impl UpdateSource for StaticManifestSource {
             target_arch: std::env::consts::ARCH,
         })?;
 
+        let deltas = main
+            .deltas
+            .iter()
+            .filter_map(|d| delta_asset(d, &version))
+            .collect();
         Ok(Release {
             version,
             notes: manifest
@@ -149,7 +201,67 @@ impl UpdateSource for StaticManifestSource {
                 .ed25519_signature
                 .clone()
                 .filter(|s| !s.trim().is_empty()),
+            deltas,
         })
+    }
+}
+
+impl StaticManifestSource {
+    /// Fetch and parse the manifest, verifying its signature first when keys
+    /// are configured.
+    fn fetch_manifest(&self) -> Result<Manifest> {
+        if self.keys.is_empty() {
+            return http::get_json(&self.url, &[]);
+        }
+        let signature_url = self
+            .signature_url
+            .clone()
+            .unwrap_or_else(|| format!("{}.minisig", self.url));
+        let body = trust::fetch_signed(&self.url, &signature_url, &self.keys)?;
+        serde_json::from_str(&body).map_err(|e| Error::Parse(e.to_string()))
+    }
+}
+
+/// A manifest delta as a [`DeltaAsset`]; `to` defaults to the manifest's
+/// own version.
+fn delta_asset(delta: &ManifestDelta, version: &Version) -> Option<DeltaAsset> {
+    let parse = |tag: &str, field: &str| match parse_tag(tag) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(error = %e, field, "ignoring manifest delta with an invalid version");
+            None
+        }
+    };
+    let from = parse(&delta.from, "from")?;
+    let to = match &delta.to {
+        Some(to) if !to.trim().is_empty() => parse(to, "to")?,
+        _ => version.clone(),
+    };
+    let non_empty = |s: &Option<String>| s.clone().filter(|s| !s.trim().is_empty());
+    Some(DeltaAsset {
+        from,
+        to,
+        format: non_empty(&delta.format)
+            .unwrap_or_else(|| DELTA_FORMAT_FILES_BSDIFF_V1.to_string()),
+        asset: Asset {
+            name: non_empty(&delta.name).unwrap_or_else(|| url_file_name(&delta.url)),
+            url: delta.url.clone(),
+            size: delta.size.unwrap_or(0),
+        },
+        sha256: delta.sha256.as_ref().map(|s| s.trim().to_ascii_lowercase()),
+        checksums_url: None,
+        signature: non_empty(&delta.signature),
+        signature_url: non_empty(&delta.signature_url),
+        ed25519_signature: non_empty(&delta.ed25519_signature),
+    })
+}
+
+/// The last path segment of `url`, without query or fragment.
+fn url_file_name(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    match path.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => "update.delta".to_string(),
     }
 }
 
@@ -201,6 +313,9 @@ struct Manifest {
     notes: Option<String>,
     #[serde(default)]
     notes_url: Option<String>,
+    /// RFC 3339 time after which the manifest must not be trusted.
+    #[serde(default)]
+    expires: Option<String>,
     #[serde(default)]
     assets: Vec<ManifestAsset>,
 }
@@ -236,120 +351,33 @@ struct ManifestAsset {
     arch: Option<String>,
     #[serde(default)]
     format: Option<String>,
+    #[serde(default)]
+    deltas: Vec<ManifestDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestDelta {
+    from: String,
+    /// Defaults to the manifest's `version`; set it to list deltas between
+    /// older releases, which the engine can chain.
+    #[serde(default)]
+    to: Option<String>,
+    url: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    signature_url: Option<String>,
+    #[serde(default)]
+    ed25519_signature: Option<String>,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pats(p: &[&str]) -> Vec<String> {
-        p.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn asset_matching_requires_all_substrings_case_insensitively() {
-        let asset = ManifestAsset {
-            name: "OpenLogi-v0.2.1-macOS-arm64.DMG".to_string(),
-            url: "https://dl.example.com/app.dmg".to_string(),
-            size: None,
-            sha256: None,
-            signature: None,
-            signature_url: None,
-            ed25519_signature: None,
-            os: Some("macos".to_string()),
-            arch: Some("arm64".to_string()),
-            format: Some("dmg".to_string()),
-        };
-        assert!(asset_matches(
-            &asset,
-            AssetSelector {
-                name_patterns: &pats(&["macos", "arm64", ".dmg"]),
-                os: Some("macos"),
-                arch: Some("ARM64"),
-                format: Some("dmg"),
-            }
-        ));
-        assert!(!asset_matches(
-            &asset,
-            AssetSelector {
-                name_patterns: &pats(&["macos", "arm64", ".dmg"]),
-                os: Some("windows"),
-                arch: Some("arm64"),
-                format: Some("dmg"),
-            }
-        ));
-    }
-
-    #[test]
-    fn deserializes_manifest_with_flat_assets_and_unknown_fields() {
-        let json = r#"{
-            "schema_version": 1,
-            "app_id": "org.openlogi.OpenLogi",
-            "version": "v0.2.1",
-            "channel": "stable",
-            "published_at": "2026-06-01T12:00:00Z",
-            "notes": "notes here",
-            "assets": [
-                {
-                    "name": "OpenLogi-v0.2.1-macos-arm64.dmg",
-                    "url": "https://dl.example.com/OpenLogi-v0.2.1-macos-arm64.dmg",
-                    "os": "macos",
-                    "arch": "arm64",
-                    "format": "dmg",
-                    "size": 1234,
-                    "sha256": "ABCDEF",
-                    "signature": "trusted comment: sig",
-                    "ed25519_signature": "c2ln",
-                    "minimum_os_version": "13.0"
-                }
-            ]
-        }"#;
-        let manifest: Manifest = serde_json::from_str(json).unwrap();
-        manifest.validate_schema_version().unwrap();
-        assert_eq!(parse_tag(&manifest.version).unwrap().to_string(), "0.2.1");
-        let picked = select_asset(
-            &manifest.assets,
-            AssetSelector {
-                name_patterns: &pats(&["macos", "arm64"]),
-                os: Some("macos"),
-                arch: Some("arm64"),
-                format: Some("dmg"),
-            },
-        )
-        .unwrap();
-        assert_eq!(picked.size, Some(1234));
-        assert_eq!(picked.sha256.as_deref(), Some("ABCDEF"));
-        assert_eq!(picked.ed25519_signature.as_deref(), Some("c2ln"));
-        assert!(
-            select_asset(
-                &manifest.assets,
-                AssetSelector {
-                    name_patterns: &pats(&[]),
-                    os: Some("windows"),
-                    arch: None,
-                    format: None,
-                },
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn explicit_format_replaces_default_extension_matcher() {
-        let source = StaticManifestSource::new("https://dl.example.com/latest.json").format("dmg");
-        assert_eq!(source.asset_patterns, Vec::<String>::new());
-        assert_eq!(source.format.as_deref(), Some("dmg"));
-    }
-
-    #[test]
-    fn rejects_unknown_schema_version() {
-        let manifest = Manifest {
-            schema_version: Some(2),
-            version: "1.0.0".to_string(),
-            notes: None,
-            notes_url: None,
-            assets: Vec::new(),
-        };
-        assert!(manifest.validate_schema_version().is_err());
-    }
-}
+mod tests;

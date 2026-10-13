@@ -17,7 +17,7 @@ use crate::error::Result;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -40,7 +40,10 @@ pub struct Installed {
 /// Install a downloaded update artifact over `install_root`.
 ///
 /// - `artifact`: the downloaded file (`.dmg` on macOS, `.tar.gz` on Linux,
-///   `.exe` or `.msi` on Windows).
+///   `.exe` or `.msi` on Windows). On macOS and Linux it may also be a
+///   directory holding an already-unpacked payload (the `.app` bundle or the
+///   executable), which is what [`UpdateEngine::download`](crate::UpdateEngine::download)
+///   returns after rebuilding an update from a delta.
 /// - `install_root`: what to replace — on macOS the `.app` bundle directory,
 ///   on Linux the executable file. Use [`current_install_root`] to derive it.
 ///

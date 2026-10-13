@@ -11,6 +11,11 @@ readme = "../../README.md"
 keywords = ["gpui", "updater", "auto-update", "desktop"]
 categories = ["gui", "development-tools"]
 
+[features]
+default = []
+# Delta-first downloads with automatic fallback; see gpui-updater-core.
+delta = ["gpui-updater-core/delta"]
+
 [dependencies]
 # Carries `DriverEvent`s from an external update driver onto the GPUI
 # foreground. GPUI already depends on `futures`.

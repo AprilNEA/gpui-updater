@@ -18,6 +18,10 @@
 //! - [`UpdateDriver`] — the contract for handing the whole flow to an external
 //!   updater instead of the engine; `gpui-updater-sparkle` implements it with
 //!   Sparkle on macOS.
+//! - `delta` (behind the `delta` feature) — binary delta updates: create a
+//!   per-file bsdiff delta in release CI, and let the engine rebuild the new
+//!   version from the installed one, falling back to the full download on any
+//!   problem. See the README's "Delta updates" section.
 //! - [`UpdateStatus`] — backend-independent state used by the separate
 //!   `gpui-updater` (official GPUI) and `gpui-updater-pre` adapters, whichever
 //!   backend (engine or driver) they run.
@@ -62,16 +66,23 @@ mod http;
 mod release;
 mod status;
 
+#[cfg(feature = "delta")]
+pub mod delta;
 pub mod driver;
 pub mod install;
 pub mod source;
 pub mod verify;
 
 pub use driver::{DriverEvent, DriverEvents, UpdateDriver};
-pub use engine::{EngineConfig, UpdateEngine, Verification};
+pub use engine::{
+    BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, EngineConfig, UpdateEngine, Verification,
+    VersionBinding,
+};
 pub use error::{Error, Result};
 pub use install::{Installed, current_install_root};
-pub use release::{Asset, Release, parse_tag, parse_version_lenient};
+pub use release::{
+    Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, parse_version_lenient,
+};
 /// Re-exported so consumers can build an [`EngineConfig`] without depending on
 /// `semver` directly (e.g. `Version::parse(env!("CARGO_PKG_VERSION"))`).
 pub use semver::Version;

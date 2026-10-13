@@ -4,6 +4,10 @@ use semver::Version;
 
 use crate::error::{Error, Result};
 
+/// Format identifier of the deltas produced by the `delta` feature's
+/// `delta::create`: per-file bsdiff patches against the installed tree.
+pub const DELTA_FORMAT_FILES_BSDIFF_V1: &str = "files-bsdiff-v1";
+
 /// A downloadable file attached to a release.
 ///
 /// Marked `#[non_exhaustive]`: build one with [`Asset::new`] so new fields can
@@ -56,6 +60,10 @@ pub struct Release {
     /// prints). Verified against
     /// [`EngineConfig::ed25519_public_key`](crate::EngineConfig::ed25519_public_key).
     pub ed25519_signature: Option<String>,
+    /// Binary deltas that rebuild this release from older installed versions.
+    /// Empty when the source publishes none. Used only with the `delta` feature;
+    /// the full `asset` remains the fallback.
+    pub deltas: Vec<DeltaAsset>,
 }
 
 impl Release {
@@ -70,6 +78,7 @@ impl Release {
             signature_url: None,
             sha256: None,
             ed25519_signature: None,
+            deltas: Vec::new(),
         }
     }
 
@@ -107,6 +116,67 @@ impl Release {
     pub fn with_ed25519_signature(mut self, signature: impl Into<String>) -> Self {
         self.ed25519_signature = Some(signature.into());
         self
+    }
+
+    /// Attach the binary deltas that rebuild this release from older
+    /// versions.
+    #[must_use]
+    pub fn with_deltas(mut self, deltas: Vec<DeltaAsset>) -> Self {
+        self.deltas = deltas;
+        self
+    }
+}
+
+/// A binary delta that upgrades one specific installed version to another.
+///
+/// Most deltas end at the release they are attached to. Sources that also list
+/// deltas of earlier releases let the engine chain several of them when no
+/// delta starts at the installed version.
+///
+/// Marked `#[non_exhaustive]`: build one with [`DeltaAsset::new`] and set the
+/// public fields afterwards.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DeltaAsset {
+    /// The installed version this delta applies to.
+    pub from: Version,
+    /// The version this delta produces.
+    pub to: Version,
+    /// Delta format, e.g. [`DELTA_FORMAT_FILES_BSDIFF_V1`]. Deltas in unknown
+    /// formats are ignored.
+    pub format: String,
+    /// The delta file to download.
+    pub asset: Asset,
+    /// Expected lowercase hex SHA-256 of the delta file, when published.
+    pub sha256: Option<String>,
+    /// URL of a `SHA256SUMS`-style file listing the delta's checksum under
+    /// `asset.name`, fetched only if this delta is actually used. Ignored when
+    /// `sha256` is set.
+    pub checksums_url: Option<String>,
+    /// Inline detached minisign signature of the delta file, when published.
+    pub signature: Option<String>,
+    /// URL of a detached minisign signature of the delta file, when published.
+    pub signature_url: Option<String>,
+    /// Base64 Ed25519 signature of the delta file in Sparkle's
+    /// `sparkle:edSignature` format, when published.
+    pub ed25519_signature: Option<String>,
+}
+
+impl DeltaAsset {
+    /// A delta in the [`DELTA_FORMAT_FILES_BSDIFF_V1`] format that upgrades
+    /// `from` to `to`, with no checksum or signatures yet.
+    pub fn new(from: Version, to: Version, asset: Asset) -> Self {
+        Self {
+            from,
+            to,
+            format: DELTA_FORMAT_FILES_BSDIFF_V1.to_string(),
+            asset,
+            sha256: None,
+            checksums_url: None,
+            signature: None,
+            signature_url: None,
+            ed25519_signature: None,
+        }
     }
 }
 

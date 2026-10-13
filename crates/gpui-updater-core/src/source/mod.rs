@@ -8,6 +8,7 @@
 mod appcast;
 mod github;
 mod manifest;
+mod trust;
 
 pub use appcast::{AppcastSource, AppcastVersion};
 pub use github::GitHubSource;
