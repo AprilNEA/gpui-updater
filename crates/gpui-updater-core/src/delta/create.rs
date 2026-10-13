@@ -28,7 +28,10 @@ const ALWAYS_COMPARE_LEN: usize = 1 << 20;
 const FULL_COPY_RATIO: usize = 10;
 
 /// The version pair a delta upgrades between.
+///
+/// Marked `#[non_exhaustive]`: build one with [`VersionPair::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VersionPair {
     /// The installed version the delta applies to.
     pub from: Version,
