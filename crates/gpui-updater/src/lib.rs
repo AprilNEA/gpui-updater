@@ -307,7 +307,7 @@ impl Updater {
             }
 
             let artifact = match dl_task.await {
-                Ok(path) => path,
+                Ok(artifact) => artifact,
                 Err(e) => {
                     this.update(cx, |this, cx| {
                         this.task = None;

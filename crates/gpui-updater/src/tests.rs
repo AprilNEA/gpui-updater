@@ -23,7 +23,7 @@ impl UpdateSource for Source {
 fn release(version: u64) -> Release {
     Release::new(
         Version::new(version, 0, 0),
-        Asset::new("update.tar.gz", "http://unused.invalid", 0),
+        Asset::new("update.tar.gz", "https://unused.invalid", 0),
     )
     .with_notes("fixture notes")
 }

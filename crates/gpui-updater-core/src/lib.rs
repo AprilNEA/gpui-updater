@@ -64,6 +64,7 @@ mod engine;
 mod error;
 mod http;
 mod release;
+mod staging;
 mod status;
 
 #[cfg(feature = "delta")]
@@ -75,8 +76,8 @@ pub mod verify;
 
 pub use driver::{DriverEvent, DriverEvents, UpdateDriver};
 pub use engine::{
-    BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, EngineConfig, UpdateEngine, Verification,
-    VersionBinding,
+    Artifact, BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, DEFAULT_MAX_DOWNLOAD_SIZE,
+    EngineConfig, UpdateEngine, Verification, VersionBinding,
 };
 pub use error::{Error, Result};
 pub use install::{Installed, current_install_root};

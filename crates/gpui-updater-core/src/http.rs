@@ -8,6 +8,11 @@
 //! transient transport failures are retried with backoff, so a momentary
 //! network blip, a VPN reconnect, or a dropped keep-alive doesn't abort an
 //! update with a hard error.
+//!
+//! Only HTTPS is spoken (see [`policy`]), and response sizes are bounded, so
+//! a hostile server cannot exhaust memory or disk.
+
+mod policy;
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -18,6 +23,9 @@ use std::time::Duration;
 
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
+
+use policy::Transport;
+pub(crate) use policy::{Metadata, ensure_secure};
 
 use crate::error::{Error, Result};
 
@@ -84,6 +92,7 @@ fn metadata_agent() -> Agent {
     Agent::config_builder()
         .user_agent(USER_AGENT)
         .tls_config(tls_config())
+        .https_only(true)
         .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(RECV_RESPONSE_TIMEOUT))
@@ -98,6 +107,7 @@ fn download_agent(stall: Duration) -> Agent {
     Agent::config_builder()
         .user_agent(USER_AGENT)
         .tls_config(tls_config())
+        .https_only(true)
         .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_body(Some(stall))
@@ -105,20 +115,32 @@ fn download_agent(stall: Duration) -> Agent {
         .into()
 }
 
+/// A GET for `url` that may only follow redirects `transport` allows.
 fn build(
     agent: &Agent,
     url: &str,
     headers: &[(&str, &str)],
+    transport: Transport,
 ) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
-    let mut req = agent.get(url);
+    let config = agent.get(url).config();
+    let mut req = match transport {
+        Transport::Https => config.https_only(true),
+        // A redirect could lead off the machine, still over plain HTTP.
+        Transport::LoopbackHttp => config.https_only(false).max_redirects(0),
+    }
+    .build();
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
     req
 }
 
-fn http_err(e: impl std::fmt::Display) -> Error {
-    Error::Http(e.to_string())
+fn http_err(e: ureq::Error) -> Error {
+    match e {
+        // A redirect to plain HTTP.
+        ureq::Error::RequireHttpsOnly(url) => Error::InsecureUrl(url),
+        other => Error::Http(other.to_string()),
+    }
 }
 
 /// Wrap the final (non-retried) error, keeping the URL for a non-success status.
@@ -169,17 +191,36 @@ fn retrying<T>(
 
 /// One GET that fails with a typed [`ureq::Error`] (a non-success status maps to
 /// [`ureq::Error::StatusCode`]) so [`retrying`] can classify it.
-fn get_bytes(
-    agent: &Agent,
-    url: &str,
-    headers: &[(&str, &str)],
-) -> std::result::Result<Vec<u8>, ureq::Error> {
-    let mut resp = build(agent, url, headers).call()?;
+fn get_bytes(agent: &Agent, request: &Request<'_>) -> std::result::Result<Vec<u8>, ureq::Error> {
+    let mut resp = build(agent, request.url, request.headers, request.transport).call()?;
     let status = resp.status();
     if !status.is_success() {
         return Err(ureq::Error::StatusCode(status.as_u16()));
     }
-    resp.body_mut().read_to_vec()
+    resp.body_mut()
+        .with_config()
+        .limit(request.kind.max_len())
+        .read_to_vec()
+}
+
+/// One metadata request.
+struct Request<'a> {
+    url: &'a str,
+    headers: &'a [(&'a str, &'a str)],
+    transport: Transport,
+    kind: Metadata,
+}
+
+/// `GET` a metadata URL, retrying transient failures.
+fn get_metadata(url: &str, headers: &[(&str, &str)], kind: Metadata) -> Result<Vec<u8>> {
+    let request = Request {
+        url,
+        headers,
+        transport: Transport::of(url)?,
+        kind,
+    };
+    let agent = metadata_agent();
+    retrying(|| get_bytes(&agent, &request)).map_err(|e| finalize(url, e))
 }
 
 /// `GET` a URL and deserialize the JSON body, retrying transient failures.
@@ -187,15 +228,14 @@ pub(crate) fn get_json<T: serde::de::DeserializeOwned>(
     url: &str,
     headers: &[(&str, &str)],
 ) -> Result<T> {
-    let agent = metadata_agent();
-    let body = retrying(|| get_bytes(&agent, url, headers)).map_err(|e| finalize(url, e))?;
+    let body = get_metadata(url, headers, Metadata::Document)?;
     serde_json::from_slice(&body).map_err(|e| Error::Parse(e.to_string()))
 }
 
 /// `GET` a URL and return the body as text, retrying transient failures.
-pub(crate) fn get_string(url: &str, headers: &[(&str, &str)]) -> Result<String> {
-    let agent = metadata_agent();
-    let bytes = retrying(|| get_bytes(&agent, url, headers)).map_err(|e| finalize(url, e))?;
+/// A body larger than `kind` allows fails.
+pub(crate) fn get_string(url: &str, headers: &[(&str, &str)], kind: Metadata) -> Result<String> {
+    let bytes = get_metadata(url, headers, kind)?;
     String::from_utf8(bytes).map_err(|e| Error::Parse(e.to_string()))
 }
 
@@ -208,6 +248,8 @@ pub(crate) struct Fetch<'a> {
     /// another size is rejected, and a body growing past it is cut off, so a
     /// hostile server cannot fill the disk.
     pub(crate) expected_len: Option<u64>,
+    /// The most bytes accepted, whether or not a size was published.
+    pub(crate) max_len: u64,
 }
 
 impl<'a> Fetch<'a> {
@@ -216,6 +258,7 @@ impl<'a> Fetch<'a> {
             url,
             headers: &[],
             expected_len: None,
+            max_len: u64::MAX,
         }
     }
 
@@ -225,6 +268,19 @@ impl<'a> Fetch<'a> {
             expected_len: (len > 0).then_some(len),
             ..self
         }
+    }
+
+    /// Refuse bodies larger than `len` bytes, even when no size is published.
+    pub(crate) fn max_len(self, len: u64) -> Self {
+        Self {
+            max_len: len,
+            ..self
+        }
+    }
+
+    /// The most bytes the body may have: the published size when known.
+    fn limit(&self) -> u64 {
+        self.expected_len.unwrap_or(self.max_len)
     }
 }
 
@@ -240,9 +296,10 @@ struct Transfer<'a> {
 /// size.
 ///
 /// Redirects (e.g. a GitHub release asset to its storage backend) are followed
-/// by `ureq` automatically. A transient transport failure — at connect or
-/// mid-stream — restarts the download from byte zero (the partial file is
-/// truncated and `progress` resets), up to [`MAX_RETRIES`] times.
+/// by `ureq` automatically, but never to plain HTTP. A transient transport
+/// failure — at connect or mid-stream — restarts the download from byte zero
+/// (the partial file is truncated and `progress` resets), up to
+/// [`MAX_RETRIES`] times.
 pub(crate) fn download(
     fetch: &Fetch<'_>,
     dest: &Path,
@@ -264,6 +321,12 @@ fn download_with(
     dest: &Path,
     mut progress: impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
+    if let Some(expected) = fetch.expected_len.filter(|&len| len > fetch.max_len) {
+        return Err(Error::Http(format!(
+            "GET {} -> {expected} bytes published, more than the {}-byte limit",
+            fetch.url, fetch.max_len
+        )));
+    }
     let mut tries: u32 = 0;
     loop {
         match download_once(transfer, fetch, dest, &mut progress) {
@@ -283,24 +346,24 @@ fn download_with(
 /// `timeout_recv_response` leaking into the body. A deadline miss is transient:
 /// the canonical cause is a VPN drop black-holing an established connection.
 fn call_with_deadline(
-    agent: &Agent,
-    deadline: Duration,
-    url: &str,
-    headers: &[(&str, &str)],
+    transfer: Transfer<'_>,
+    fetch: &Fetch<'_>,
+    transport: Transport,
 ) -> std::result::Result<ureq::http::Response<ureq::Body>, (Error, bool)> {
+    let (url, deadline) = (fetch.url, transfer.pre_body);
     let (tx, rx) = mpsc::channel();
-    let agent = agent.clone();
+    let agent = transfer.agent.clone();
     let owned_url = url.to_string();
-    let owned_headers: Vec<(String, String)> = headers
+    let owned_headers: Vec<(String, String)> = fetch
+        .headers
         .iter()
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
     // On a deadline miss this thread stays blocked until the OS gives up on the
     // socket, then exits; its send into the dropped channel is ignored.
     thread::spawn(move || {
-        let mut req = agent
-            .get(&owned_url)
-            .header("accept", "application/octet-stream");
+        let mut req =
+            build(&agent, &owned_url, &[], transport).header("accept", "application/octet-stream");
         for (k, v) in &owned_headers {
             req = req.header(k.as_str(), v.as_str());
         }
@@ -329,7 +392,8 @@ fn download_once(
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> std::result::Result<(), (Error, bool)> {
     let url = fetch.url;
-    let mut resp = call_with_deadline(transfer.agent, transfer.pre_body, url, fetch.headers)?;
+    let transport = Transport::of(url).map_err(|e| (e, false))?;
+    let mut resp = call_with_deadline(transfer, fetch, transport)?;
     let status = resp.status();
     if !status.is_success() {
         let code = status.as_u16();
@@ -352,8 +416,22 @@ fn download_once(
             ));
         }
     }
+    if let Some(announced) = announced.filter(|&len| len > fetch.max_len) {
+        return Err((
+            Error::Http(format!(
+                "GET {url} -> {announced} bytes, more than the {}-byte limit",
+                fetch.max_len
+            )),
+            false,
+        ));
+    }
     let total = announced.or(fetch.expected_len);
-    let limit = fetch.expected_len.unwrap_or(u64::MAX);
+    let limit = fetch.limit();
+    let bound = if fetch.expected_len.is_some() {
+        "published"
+    } else {
+        "allowed"
+    };
 
     let mut file = File::create(dest).map_err(|e| (Error::Io(e), false))?;
     let mut reader = resp.body_mut().as_reader();
@@ -367,9 +445,7 @@ fn download_once(
         downloaded += n as u64;
         if downloaded > limit {
             return Err((
-                Error::Http(format!(
-                    "GET {url} -> more than the published {limit} bytes"
-                )),
+                Error::Http(format!("GET {url} -> more than the {bound} {limit} bytes")),
                 false,
             ));
         }

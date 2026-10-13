@@ -9,6 +9,12 @@ pub enum Error {
     #[error("http error: {0}")]
     Http(String),
 
+    /// A URL would be fetched without TLS: it, or a redirect it led to, is not
+    /// `https://`. Plain HTTP is accepted only for loopback hosts
+    /// (`localhost`, `127.0.0.0/8`, `::1`).
+    #[error("refusing to fetch {0} without HTTPS (plain HTTP is allowed for loopback hosts only)")]
+    InsecureUrl(String),
+
     /// Release metadata could not be parsed (bad JSON, missing fields, or an
     /// unparseable version tag).
     #[error("failed to parse release metadata: {0}")]

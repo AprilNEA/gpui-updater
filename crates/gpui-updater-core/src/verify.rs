@@ -19,21 +19,27 @@ const CHUNK: usize = 64 * 1024;
 /// # Errors
 /// Returns [`Error::Io`] if the file cannot be read.
 pub fn sha256_hex(path: &Path) -> Result<String> {
-    let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
+    for_each_chunk(path, |chunk| hasher.update(chunk))?;
     let mut out = String::with_capacity(64);
     for byte in hasher.finalize() {
         let _ = write!(out, "{byte:02x}");
     }
     Ok(out)
+}
+
+/// Feed the contents of the file at `path` to `consume`, one chunk at a time,
+/// so large artifacts are never held in memory.
+fn for_each_chunk(path: &Path, mut consume: impl FnMut(&[u8])) -> Result<()> {
+    let mut file = File::open(path)?;
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        consume(&buf[..n]);
+    }
 }
 
 /// Verify a file against an expected hex SHA-256 (case-insensitive).
@@ -58,14 +64,55 @@ pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<()> {
 ///   `minisign.pub`, or the whole single-line key).
 /// - `signature`: the contents of the `.minisig` file.
 ///
+/// The file is streamed, so large disk images are not read into memory.
+///
 /// [minisign]: https://jedisct1.github.io/minisign/
 ///
 /// # Errors
 /// Returns [`Error::Signature`] if the key/signature cannot be decoded or the
 /// signature does not match the file's contents.
 pub fn verify_minisign(path: &Path, public_key: &str, signature: &str) -> Result<()> {
-    let data = std::fs::read(path)?;
-    verify_minisign_bytes(&data, &[public_key], signature).map(drop)
+    verify_minisign_file(path, &[public_key], signature).map(drop)
+}
+
+/// Verify the file at `path` against a detached minisign signature made by
+/// any of `public_keys`, and return the signature's trusted comment.
+///
+/// Like [`verify_minisign_bytes`], but the file is streamed rather than read
+/// into memory. Only the default, pre-hashed minisign signatures are accepted
+/// (legacy ones are rejected either way).
+///
+/// # Errors
+/// Returns [`Error::Signature`] if no key is given, the signature cannot be
+/// decoded, or no key verifies it, and [`Error::Io`] if the file cannot be
+/// read.
+pub fn verify_minisign_file(path: &Path, public_keys: &[&str], signature: &str) -> Result<String> {
+    let sig = decode_minisign(signature)?;
+    let mut last = Error::Signature("no minisign public key configured".into());
+    for key in public_keys {
+        let pk = match decode_minisign_key(key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                last = e;
+                continue;
+            }
+        };
+        // Fails without reading the file when the key ID does not match, so a
+        // file is normally streamed once even with several keys configured.
+        let mut verifier = match pk.verify_stream(&sig) {
+            Ok(verifier) => verifier,
+            Err(e) => {
+                last = Error::Signature(e.to_string());
+                continue;
+            }
+        };
+        for_each_chunk(path, |chunk| verifier.update(chunk))?;
+        match verifier.finalize() {
+            Ok(()) => return Ok(sig.trusted_comment().to_string()),
+            Err(e) => last = Error::Signature(e.to_string()),
+        }
+    }
+    Err(last)
 }
 
 /// Verify `data` against a detached minisign signature made by any of
@@ -80,22 +127,29 @@ pub fn verify_minisign(path: &Path, public_key: &str, signature: &str) -> Result
 /// Returns [`Error::Signature`] if no key is given, the signature cannot be
 /// decoded, or no key verifies it.
 pub fn verify_minisign_bytes(data: &[u8], public_keys: &[&str], signature: &str) -> Result<String> {
-    let sig = minisign_verify::Signature::decode(signature)
-        .map_err(|e| Error::Signature(format!("invalid signature: {e}")))?;
+    let sig = decode_minisign(signature)?;
     let mut last = Error::Signature("no minisign public key configured".into());
     for key in public_keys {
-        let verified = minisign_verify::PublicKey::from_base64(key.trim())
-            .map_err(|e| Error::Signature(format!("invalid public key: {e}")))
-            .and_then(|pk| {
-                pk.verify(data, &sig, false)
-                    .map_err(|e| Error::Signature(e.to_string()))
-            });
+        let verified = decode_minisign_key(key).and_then(|pk| {
+            pk.verify(data, &sig, false)
+                .map_err(|e| Error::Signature(e.to_string()))
+        });
         match verified {
             Ok(()) => return Ok(sig.trusted_comment().to_string()),
             Err(e) => last = e,
         }
     }
     Err(last)
+}
+
+fn decode_minisign(signature: &str) -> Result<minisign_verify::Signature> {
+    minisign_verify::Signature::decode(signature)
+        .map_err(|e| Error::Signature(format!("invalid signature: {e}")))
+}
+
+fn decode_minisign_key(key: &str) -> Result<minisign_verify::PublicKey> {
+    minisign_verify::PublicKey::from_base64(key.trim())
+        .map_err(|e| Error::Signature(format!("invalid public key: {e}")))
 }
 
 /// The value of the `version:` token in a minisign trusted comment, if any.
@@ -163,16 +217,7 @@ pub fn verify_ed25519(path: &Path, public_key: &str, signature: &str) -> Result<
     let mut state = pk
         .verify_incremental(&sig)
         .map_err(|e| Error::Signature(format!("invalid Ed25519 signature: {e}")))?;
-
-    let mut file = File::open(path)?;
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        state.absorb(&buf[..n]);
-    }
+    for_each_chunk(path, |chunk| state.absorb(chunk))?;
     state
         .verify()
         .map_err(|_| Error::Signature("Ed25519 signature does not match the file".into()))
@@ -279,6 +324,45 @@ mod tests {
             verify_minisign_bytes(b"x", &[], "not a signature"),
             Err(Error::Signature(_))
         ));
+    }
+
+    #[test]
+    fn streams_minisign_verification_across_chunks() {
+        // Larger than one read chunk, so the signature covers several.
+        let data: Vec<u8> = (0u8..=255).cycle().take(CHUNK * 3 + 17).collect();
+        let (signer, other) = (
+            minisign::KeyPair::generate_unencrypted_keypair().unwrap(),
+            minisign::KeyPair::generate_unencrypted_keypair().unwrap(),
+        );
+        let signature = minisign::sign(
+            None,
+            &signer.sk,
+            std::io::Cursor::new(&data),
+            Some("file:app.dmg\tversion:1.0.0"),
+            None,
+        )
+        .unwrap()
+        .to_string();
+        let (key, other_key) = (signer.pk.to_base64(), other.pk.to_base64());
+        let path = temp_file(&data);
+
+        // The signing key may come after keys that do not match.
+        let comment = verify_minisign_file(&path, &[&other_key, &key], &signature).unwrap();
+        assert_eq!(comment, "file:app.dmg\tversion:1.0.0");
+        assert!(verify_minisign(&path, &key, &signature).is_ok());
+        assert!(matches!(
+            verify_minisign_file(&path, &[&other_key], &signature),
+            Err(Error::Signature(_))
+        ));
+
+        let mut tampered = data;
+        tampered[CHUNK * 2] ^= 1;
+        std::fs::write(&path, &tampered).unwrap();
+        assert!(matches!(
+            verify_minisign_file(&path, &[&key], &signature),
+            Err(Error::Signature(_))
+        ));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

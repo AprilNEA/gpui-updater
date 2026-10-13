@@ -37,6 +37,10 @@ enum Fault {
     /// Send the body without `Content-Length`, ending it by closing the
     /// connection.
     Unsized,
+    /// Send a body one byte larger than a sidecar may be.
+    OversizedSidecar,
+    /// Redirect to a plain-HTTP URL off the machine.
+    RedirectOffMachine,
 }
 
 /// Serve `fault` for the first `fail_first` connections, then a healthy
@@ -122,6 +126,17 @@ fn handle(mut stream: TcpStream, fault: Option<Fault>) {
             let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
             let _ = stream.write_all(&artifact());
         }
+        Some(Fault::OversizedSidecar) => {
+            read_request(&mut stream);
+            let len = usize::try_from(Metadata::Sidecar.max_len()).unwrap() + 1;
+            serve_body(&mut stream, &vec![b'x'; len]);
+        }
+        Some(Fault::RedirectOffMachine) => {
+            read_request(&mut stream);
+            let _ = stream.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: http://updates.example.invalid/app.dmg\r\nContent-Length: 0\r\n\r\n",
+            );
+        }
         None => {
             read_request(&mut stream);
             serve_body(&mut stream, &artifact());
@@ -174,6 +189,123 @@ fn enforces_the_published_size() {
     );
     // The exact size passes.
     assert!(sized_download(Fault::Unsized, len, "size-exact").is_ok());
+}
+
+#[test]
+fn enforces_the_download_limit_without_a_published_size() {
+    let addr = spawn_server(Fault::Unsized, usize::MAX);
+    let url = format!("http://{addr}/update.bin");
+    let dest = temp_dest("limit-unsized");
+    let err = download(&Fetch::new(&url).max_len(1000), &dest, |_, _| {}).unwrap_err();
+    assert!(
+        err.to_string().contains("more than the allowed 1000 bytes"),
+        "{err}"
+    );
+    // An announced size over the limit fails before the body is read.
+    let addr = spawn_server(Fault::TrickleBody, usize::MAX);
+    let url = format!("http://{addr}/update.bin");
+    let started = Instant::now();
+    let err = download(&Fetch::new(&url).max_len(1000), &dest, |_, _| {}).unwrap_err();
+    assert!(err.to_string().contains("1000-byte limit"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "must not wait for the body"
+    );
+    // A published size over the limit fails without connecting at all.
+    let fetch = Fetch::new("http://127.0.0.1:9/update.bin")
+        .expect_len(2000)
+        .max_len(1000);
+    let err = download(&fetch, &dest, |_, _| {}).unwrap_err();
+    assert!(err.to_string().contains("2000 bytes published"), "{err}");
+    let _ = std::fs::remove_file(&dest);
+}
+
+#[test]
+fn bounds_metadata_bodies() {
+    let addr = spawn_server(Fault::OversizedSidecar, usize::MAX);
+    let url = format!("http://{addr}/app.dmg.minisig");
+    let started = Instant::now();
+    assert!(matches!(
+        get_string(&url, &[], Metadata::Sidecar),
+        Err(Error::Http(_))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2), "must not retry");
+    // A document may be larger than a sidecar.
+    let body = get_string(&url, &[], Metadata::Document).unwrap();
+    assert_eq!(body.len() as u64, Metadata::Sidecar.max_len() + 1);
+}
+
+#[test]
+fn allows_plain_http_only_to_loopback_hosts() {
+    for url in ["https://example.com/app.dmg", "https://127.0.0.1/app.dmg"] {
+        assert_eq!(Transport::of(url).unwrap(), Transport::Https, "{url}");
+    }
+    for url in [
+        "http://127.0.0.1:8080/latest.json",
+        "http://127.1.2.3/latest.json",
+        "http://localhost/latest.json",
+        "http://LOCALHOST:1/latest.json",
+        "http://[::1]:8080/latest.json",
+    ] {
+        assert_eq!(
+            Transport::of(url).unwrap(),
+            Transport::LoopbackHttp,
+            "{url}"
+        );
+    }
+    for url in [
+        "http://example.com/latest.json",
+        "http://10.0.0.5/latest.json",
+        "http://localhost.example.com/latest.json",
+        "http://127.0.0.1.example.com/latest.json",
+        "ftp://example.com/app.dmg",
+    ] {
+        assert!(
+            matches!(Transport::of(url), Err(Error::InsecureUrl(u)) if u == url),
+            "{url}"
+        );
+    }
+    // Not even a network URL.
+    assert!(Transport::of("file:///etc/passwd").is_err());
+}
+
+#[test]
+fn refuses_plain_http_before_connecting() {
+    // `.invalid` never resolves, so reaching DNS would fail differently.
+    let url = "http://updates.example.invalid/latest.json";
+    assert!(matches!(
+        get_string(url, &[], Metadata::Document),
+        Err(Error::InsecureUrl(_))
+    ));
+    let dest = temp_dest("insecure");
+    assert!(matches!(
+        download(&Fetch::new(url), &dest, |_, _| {}),
+        Err(Error::InsecureUrl(_))
+    ));
+    assert!(!dest.exists());
+}
+
+#[test]
+fn reports_redirects_to_plain_http_as_insecure() {
+    // ureq checks `https_only` on every redirect hop and reports a downgrade
+    // as `RequireHttpsOnly`.
+    let err = http_err(ureq::Error::RequireHttpsOnly(
+        "http://mirror.example.com/app.dmg".into(),
+    ));
+    assert!(matches!(err, Error::InsecureUrl(url) if url == "http://mirror.example.com/app.dmg"));
+    assert!(!is_transient(&ureq::Error::RequireHttpsOnly(String::new())));
+}
+
+#[test]
+fn plain_http_to_loopback_follows_no_redirects() {
+    let addr = spawn_server(Fault::RedirectOffMachine, usize::MAX);
+    let url = format!("http://{addr}/latest.json");
+    let err = get_string(&url, &[], Metadata::Document).unwrap_err();
+    assert!(err.to_string().contains("302"), "{err}");
+    let dest = temp_dest("loopback-redirect");
+    let err = download(&Fetch::new(&url), &dest, |_, _| {}).unwrap_err();
+    assert!(err.to_string().contains("302"), "{err}");
+    let _ = std::fs::remove_file(&dest);
 }
 
 #[test]
@@ -287,7 +419,7 @@ fn recovers_from_midstream_stall() {
 fn metadata_fetch_retries_transient_failures() {
     let addr = spawn_server(Fault::Status503, 2);
     let url = format!("http://{addr}/SHA256SUMS");
-    let body = get_string(&url, &[]).expect("expected recovery");
+    let body = get_string(&url, &[], Metadata::Sidecar).expect("expected recovery");
     assert_eq!(body.into_bytes(), artifact());
 }
 

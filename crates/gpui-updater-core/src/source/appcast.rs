@@ -14,7 +14,7 @@ use semver::Version;
 
 use super::UpdateSource;
 use crate::error::{Error, Result};
-use crate::http;
+use crate::http::{self, Metadata};
 use crate::release::{Asset, Release, parse_version_lenient};
 
 use feed::{Enclosure, Item};
@@ -250,7 +250,7 @@ impl AppcastSource {
 
 impl UpdateSource for AppcastSource {
     fn fetch_latest(&self) -> Result<Release> {
-        let xml = http::get_string(&self.url, &[])?;
+        let xml = http::get_string(&self.url, &[], Metadata::Document)?;
         let items = feed::parse(&xml)?;
         let needs_arch = items.iter().any(|i| !i.hardware_requirements.is_empty());
         let host = HostFacts {

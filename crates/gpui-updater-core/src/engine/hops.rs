@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::http::{self, Fetch};
 use crate::release::{DeltaAsset, Release};
 use crate::source::UpdateSource;
+use crate::staging::safe_file_name;
 
 impl<S: UpdateSource> UpdateEngine<S> {
     /// Try to rebuild the update from deltas. `None` means "use the full
@@ -120,7 +121,9 @@ impl<S: UpdateSource> UpdateEngine<S> {
     ) -> Result<()> {
         let file = dir.join(safe_file_name(&hop.asset.name, "update.delta"));
         let result = (|| {
-            let fetch = Fetch::new(&hop.asset.url).expect_len(hop.asset.size);
+            let fetch = Fetch::new(&hop.asset.url)
+                .expect_len(hop.asset.size)
+                .max_len(self.config.max_download_size);
             http::download(&fetch, &file, &mut *progress)?;
             self.config
                 .verify_file(&file, Integrity::of_delta(hop), &hop.to)?;
@@ -140,14 +143,5 @@ impl<S: UpdateSource> UpdateEngine<S> {
         })();
         let _ = std::fs::remove_file(&file);
         result
-    }
-}
-
-/// The last path component of a published file name, so a hostile name cannot
-/// escape the download directory.
-fn safe_file_name<'a>(name: &'a str, fallback: &'a str) -> &'a str {
-    match name.rsplit(['/', '\\']).next() {
-        Some(base) if !base.is_empty() && base != "." && base != ".." => base,
-        _ => fallback,
     }
 }

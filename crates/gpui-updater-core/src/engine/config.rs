@@ -5,11 +5,16 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 
 use crate::error::{Error, Result};
+use crate::http::{self, Metadata};
 use crate::release::{DeltaAsset, Release};
-use crate::{http, verify};
+use crate::verify;
 
 /// Longest chain of deltas the engine downloads by default.
 pub const DEFAULT_MAX_DELTA_HOPS: usize = 4;
+
+/// Largest download the engine accepts by default: 4 GiB, twice what GitHub
+/// Releases allows for a single asset.
+pub const DEFAULT_MAX_DOWNLOAD_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 /// How strictly [`UpdateEngine`](crate::UpdateEngine) enforces integrity and
 /// authenticity checks on a release.
@@ -138,8 +143,16 @@ pub struct EngineConfig {
     pub bundle_version: BundleVersion,
     /// Where to install. Defaults to [`crate::install::current_install_root`].
     pub install_root: Option<PathBuf>,
-    /// Directory for downloads. Defaults to a fresh temp directory.
+    /// Directory for downloads. Defaults to a fresh temp directory that only
+    /// the current user can access. A directory set here should not be
+    /// writable by other users either; the engine creates it (and missing
+    /// parents) with owner-only permissions if it does not exist.
     pub download_dir: Option<PathBuf>,
+    /// Largest file, in bytes, the engine downloads: a release publishing a
+    /// larger size is refused before anything is fetched, and a body growing
+    /// past this is cut off even when no size is published. Defaults to
+    /// [`DEFAULT_MAX_DOWNLOAD_SIZE`].
+    pub max_download_size: u64,
     /// Whether to try published binary deltas before the full artifact.
     /// Defaults to `true`; only takes effect with the `delta` feature on macOS
     /// and Linux.
@@ -162,6 +175,7 @@ impl EngineConfig {
             bundle_version: BundleVersion::default(),
             install_root: None,
             download_dir: None,
+            max_download_size: DEFAULT_MAX_DOWNLOAD_SIZE,
             deltas: true,
             max_delta_hops: DEFAULT_MAX_DELTA_HOPS,
         }
@@ -226,6 +240,14 @@ impl EngineConfig {
     #[must_use]
     pub fn download_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.download_dir = Some(path.into());
+        self
+    }
+
+    /// Set the largest file, in bytes, the engine downloads. Defaults to
+    /// [`DEFAULT_MAX_DOWNLOAD_SIZE`].
+    #[must_use]
+    pub fn max_download_size(mut self, bytes: u64) -> Self {
+        self.max_download_size = bytes;
         self
     }
 
@@ -330,8 +352,7 @@ impl EngineConfig {
                     .iter()
                     .map(String::as_str)
                     .collect();
-                let comment =
-                    verify::verify_minisign_bytes(&std::fs::read(path)?, &keys, &signature)?;
+                let comment = verify::verify_minisign_file(path, &keys, &signature)?;
                 self.check_signed_version(&comment, version)?;
                 verified_signature = true;
             }
@@ -435,7 +456,7 @@ fn resolve_checksum(file: Integrity<'_>) -> Result<Option<String>> {
     }
     match non_empty(file.checksums_url) {
         Some(url) => Ok(verify::sha256_from_sums(
-            &http::get_string(url, &[])?,
+            &http::get_string(url, &[], Metadata::Sidecar)?,
             file.name,
         )),
         None => Ok(None),
@@ -450,7 +471,7 @@ fn resolve_minisign(file: Integrity<'_>) -> Result<Option<String>> {
         return Ok(Some(signature.to_string()));
     }
     if let Some(url) = non_empty(file.signature_url) {
-        let body = http::get_string(url, &[])?;
+        let body = http::get_string(url, &[], Metadata::Sidecar)?;
         return Ok(non_empty(Some(&body)).map(str::to_string));
     }
     Ok(None)

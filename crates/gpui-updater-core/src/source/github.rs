@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::UpdateSource;
 use crate::error::{Error, Result};
-use crate::http;
+use crate::http::{self, Metadata};
 use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
 use crate::verify::sha256_from_sums;
 
@@ -169,7 +169,11 @@ impl UpdateSource for GitHubSource {
             })?;
 
         let sums = match self.sums_asset_of(release) {
-            Some(sums) => Some(http::get_string(&sums.browser_download_url, &headers)?),
+            Some(sums) => Some(http::get_string(
+                &sums.browser_download_url,
+                &headers,
+                Metadata::Sidecar,
+            )?),
             None => None,
         };
         let sha256 = sums
