@@ -340,6 +340,14 @@ row may fail without moving the download forward. Resuming works within one
 `download` call; a new call starts over. The checks below always run on the
 whole file.
 
+**Reusing a finished download.** With `EngineConfig::download_dir`, the
+directory persists between downloads. If it already holds the release's
+artifact, of the published size, and that file passes a published checksum
+or signature and the payload check, `download` returns it without fetching
+anything. An app that restarts between downloading and installing therefore
+does not download again. A file that nothing published can check is
+downloaded again.
+
 Every downloaded file, the full artifact or a delta, goes through the same
 checks, in this order:
 

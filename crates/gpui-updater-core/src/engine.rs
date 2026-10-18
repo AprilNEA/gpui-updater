@@ -72,7 +72,9 @@ impl<S: UpdateSource> UpdateEngine<S> {
     /// policies. Returns the [`Artifact`] to hand to [`install`](Self::install).
     ///
     /// Files are fetched over HTTPS only, into a fresh directory that only the
-    /// current user can access (or [`EngineConfig::download_dir`]). A download
+    /// current user can access (or [`EngineConfig::download_dir`], where an
+    /// earlier download of the same artifact that still verifies is reused
+    /// instead of fetched again). A download
     /// larger than the size the release publishes, or than
     /// [`EngineConfig::max_download_size`], is cut off. The file is then
     /// checked against its SHA-256 and minisign signature (see
@@ -125,6 +127,15 @@ impl<S: UpdateSource> UpdateEngine<S> {
     ) -> Result<Artifact> {
         cancel.check()?;
         let dir = self.download_dir()?;
+        // The name comes from release metadata; keep the file inside `dir`.
+        let artifact = dir.join(staging::safe_file_name(&release.asset.name, "update"));
+        if self.config.download_dir.is_some() {
+            if let Some(len) = self.reusable(&artifact, release) {
+                tracing::info!(path = %artifact.display(), "reusing the verified earlier download");
+                progress(len, Some(len));
+                return Ok(Artifact::verified(artifact));
+            }
+        }
         #[cfg(feature = "delta")]
         if let Some(rebuilt) = self.try_deltas(release, &dir, cancel, &mut progress) {
             match self.check_payload(&rebuilt, release) {
@@ -137,8 +148,6 @@ impl<S: UpdateSource> UpdateEngine<S> {
         }
         // A delta attempt that was cancelled must not turn into a full download.
         cancel.check()?;
-        // The name comes from release metadata; keep the file inside `dir`.
-        let artifact = dir.join(staging::safe_file_name(&release.asset.name, "update"));
         let fetch = Fetch::new(&release.asset.url)
             .expect_len(release.asset.size)
             .max_len(self.config.max_download_size)
@@ -149,6 +158,32 @@ impl<S: UpdateSource> UpdateEngine<S> {
             .verify_file(&artifact, Integrity::of_release(release), &release.version)?;
         self.check_payload(&artifact, release)?;
         Ok(Artifact::verified(artifact))
+    }
+
+    /// The size of `path`, if an earlier download left this release's
+    /// artifact there: a regular file of the published size that passes a
+    /// published checksum or signature and the payload check. A file that
+    /// passes only because nothing was published to check it against is not
+    /// reused.
+    fn reusable(&self, path: &Path, release: &Release) -> Option<u64> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        let size = release.asset.size;
+        if !meta.is_file() || (size > 0 && meta.len() != size) {
+            return None;
+        }
+        match self
+            .config
+            .verify_file(path, Integrity::of_release(release), &release.version)
+        {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(e) => {
+                tracing::debug!(error = %e, "not reusing the earlier download");
+                return None;
+            }
+        }
+        self.check_payload(path, release).ok()?;
+        Some(meta.len())
     }
 
     /// Check the app inside a verified artifact before it is offered for

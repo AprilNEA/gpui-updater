@@ -2,6 +2,8 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::error::Error;
@@ -185,6 +187,7 @@ fn verify_signed(cfg: &EngineConfig, signature: &str, version: &str) -> Result<(
         Integrity::of_release(&rel),
         &Version::parse(version).unwrap(),
     )
+    .map(|checked| assert!(checked, "no signature was checked"))
 }
 
 #[test]
@@ -423,4 +426,98 @@ fn a_cancelled_download_leaves_nothing_behind() {
         .download_cancellable(&wanted, &CancelToken::new(), |_, _| {})
         .unwrap();
     assert_eq!(std::fs::read(artifact.path()).unwrap(), b"artifact");
+}
+
+/// Serve `body` to every request, counting the requests.
+fn serve_counting(body: &'static [u8]) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let _ = stream.read(&mut [0u8; 1024]);
+            seen.fetch_add(1, Ordering::SeqCst);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+        }
+    });
+    (format!("http://{addr}/download"), count)
+}
+
+/// An engine that keeps downloads in `downloads` and skips the macOS
+/// payload check, which these fixtures cannot pass.
+fn reusing_engine(verification: Verification, downloads: &Path) -> UpdateEngine<PanicSource> {
+    UpdateEngine::new(
+        PanicSource,
+        config(verification, None)
+            .download_dir(downloads)
+            .install_root(downloads.join("installed"))
+            .bundle_version(BundleVersion::Ignore)
+            .code_signing(CodeSigning::Off),
+    )
+}
+
+const BODY: &[u8] = b"artifact";
+
+fn reusable_release(url: &str, sha256: Option<&str>) -> Release {
+    let mut wanted = release(sha256, None, None);
+    wanted.asset = Asset::new("app.bin", url, BODY.len() as u64);
+    wanted
+}
+
+fn body_sha256() -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(BODY))
+}
+
+#[test]
+fn reuses_a_verified_earlier_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, requests) = serve_counting(BODY);
+    let engine = reusing_engine(Verification::Checksum, dir.path());
+    let wanted = reusable_release(&url, Some(&body_sha256()));
+    engine.download(&wanted, |_, _| {}).unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let mut reported = Vec::new();
+    let artifact = engine
+        .download(&wanted, |got, total| reported.push((got, total)))
+        .unwrap();
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "the file was downloaded again"
+    );
+    assert_eq!(std::fs::read(artifact.path()).unwrap(), BODY);
+    assert_eq!(reported, [(8, Some(8))]);
+}
+
+#[test]
+fn downloads_again_over_a_file_that_fails_the_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, requests) = serve_counting(BODY);
+    let engine = reusing_engine(Verification::Checksum, dir.path());
+    // Same size, other bytes.
+    std::fs::write(dir.path().join("app.bin"), b"tampered").unwrap();
+    let wanted = reusable_release(&url, Some(&body_sha256()));
+    let artifact = engine.download(&wanted, |_, _| {}).unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(std::fs::read(artifact.path()).unwrap(), BODY);
+}
+
+#[test]
+fn does_not_reuse_a_file_nothing_can_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, requests) = serve_counting(BODY);
+    for verification in [Verification::BestEffort, Verification::Off] {
+        let engine = reusing_engine(verification, dir.path());
+        let wanted = reusable_release(&url, None);
+        engine.download(&wanted, |_, _| {}).unwrap();
+        engine.download(&wanted, |_, _| {}).unwrap();
+    }
+    assert_eq!(requests.load(Ordering::SeqCst), 4);
 }

@@ -236,7 +236,14 @@ impl EngineConfig {
         self
     }
 
-    /// Override the download directory (defaults to a temp directory).
+    /// Override the download directory (defaults to a fresh temp directory
+    /// for each download).
+    ///
+    /// A configured directory persists between downloads, so an artifact
+    /// that an earlier download left there is reused instead of downloaded
+    /// again — but only if it has the published size and passes a published
+    /// checksum or signature and the payload check. Without a checksum or
+    /// signature to check it against, the file is downloaded again.
     #[must_use]
     pub fn download_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.download_dir = Some(path.into());
@@ -313,23 +320,28 @@ impl EngineConfig {
     /// Verify a downloaded file under the configured policy. `version` is
     /// the version the file must be signed for. Fails closed first (so a
     /// policy-required-but-missing input is rejected before the file is read),
-    /// then runs whatever checks the metadata does provide.
+    /// then runs whatever checks the metadata does provide. Returns whether a
+    /// published checksum or signature was actually checked.
     pub(super) fn verify_file(
         &self,
         path: &Path,
         file: Integrity<'_>,
         version: &Version,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let policy = self.verification;
         if policy.skips_all() {
-            return Ok(());
+            return Ok(false);
         }
         // `download` is public and may be called without `check`, so re-run the
         // check-time gate here rather than trusting the caller went through it.
         self.precheck_integrity(file)?;
 
+        let mut verified_checksum = false;
         match resolve_checksum(file)? {
-            Some(expected) => verify::verify_sha256(path, &expected)?,
+            Some(expected) => {
+                verify::verify_sha256(path, &expected)?;
+                verified_checksum = true;
+            }
             None if policy.requires_checksum() => {
                 return Err(Error::VerificationRequired(format!(
                     "policy requires a SHA-256 checksum, but the published checksums list no `{}`",
@@ -365,7 +377,7 @@ impl EngineConfig {
                 "policy requires a signature, but the published signature is empty".into(),
             ));
         }
-        Ok(())
+        Ok(verified_checksum || verified_signature)
     }
 
     fn check_signed_version(&self, trusted_comment: &str, expected: &Version) -> Result<()> {
