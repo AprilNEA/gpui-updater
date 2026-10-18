@@ -2,10 +2,12 @@
 
 use serde::Deserialize;
 
-use super::UpdateSource;
+use super::{UpdateSource, dates};
 use crate::error::{Error, Result};
 use crate::http::{self, Metadata};
-use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
+use crate::release::{
+    Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, web_page_url,
+};
 use crate::verify::sha256_from_sums;
 
 const API: &str = "https://api.github.com";
@@ -208,6 +210,8 @@ impl UpdateSource for GitHubSource {
             sha256,
             ed25519_signature: None,
             deltas,
+            published_at: release.published_at.as_deref().and_then(dates::rfc3339),
+            release_url: web_page_url(release.html_url.as_deref()),
         })
     }
 }
@@ -320,6 +324,12 @@ struct GhRelease {
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    /// The release's page on github.com.
+    #[serde(default)]
+    html_url: Option<String>,
+    /// RFC 3339; `null` for a draft.
+    #[serde(default)]
+    published_at: Option<String>,
     #[serde(default)]
     assets: Vec<GhAsset>,
 }
@@ -427,6 +437,8 @@ mod tests {
             body: None,
             draft: false,
             prerelease: false,
+            html_url: None,
+            published_at: None,
             assets: names
                 .iter()
                 .map(|n| GhAsset {
@@ -486,12 +498,23 @@ mod tests {
             "name": "Release 0.2.0",
             "body": "notes here",
             "draft": false,
+            "html_url": "https://github.com/o/r/releases/tag/v0.2.0",
+            "published_at": "2026-10-11T12:34:56Z",
             "assets": [
                 {"name": "app-macos.dmg", "browser_download_url": "https://x/app-macos.dmg", "size": 1234}
             ]
         }"#;
         let r: GhRelease = serde_json::from_str(json).unwrap();
         assert_eq!(r.tag_name, "v0.2.0");
+        assert_eq!(
+            web_page_url(r.html_url.as_deref()).as_deref(),
+            Some("https://github.com/o/r/releases/tag/v0.2.0")
+        );
+        assert!(r.published_at.as_deref().and_then(dates::rfc3339).is_some());
+        // Drafts have `"published_at": null`.
+        let draft: GhRelease =
+            serde_json::from_str(r#"{"tag_name": "v0.3.0", "published_at": null}"#).unwrap();
+        assert_eq!(draft.published_at, None);
         assert_eq!(r.assets.len(), 1);
         assert_eq!(r.assets[0].size, 1234);
         assert_eq!(parse_tag(&r.tag_name).unwrap().minor, 2);

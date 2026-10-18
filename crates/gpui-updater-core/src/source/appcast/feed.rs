@@ -25,6 +25,10 @@ pub(super) struct Item {
     pub(super) informational: bool,
     pub(super) description: Option<String>,
     pub(super) release_notes_link: Option<String>,
+    /// The RSS `<pubDate>`, an RFC 2822 date-time.
+    pub(super) pub_date: Option<String>,
+    /// The RSS `<link>`: a web page about the release.
+    pub(super) link: Option<String>,
     pub(super) enclosures: Vec<Enclosure>,
 }
 
@@ -106,6 +110,8 @@ fn parse_item(node: Node<'_, '_>) -> Item {
             }
             (Some(SPARKLE_NS), _) => {}
             (_, "description") => item.description = text(child),
+            (None, "pubDate") => item.pub_date = text(child),
+            (None, "link") => item.link = text(child),
             (_, "enclosure") => item.enclosures.extend(parse_enclosure(child)),
             _ => {}
         }

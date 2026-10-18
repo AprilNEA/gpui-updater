@@ -13,16 +13,18 @@ use std::time::SystemTime;
 use semver::Version;
 use serde::Deserialize;
 
-use super::{UpdateSource, trust};
+use super::{UpdateSource, dates, trust};
 use crate::error::{Error, Result};
 use crate::http;
-use crate::release::{Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag};
+use crate::release::{
+    Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, web_page_url,
+};
 
 /// Reads release metadata from a static JSON manifest.
 ///
 /// The manifest describes one latest release and a flat list of downloadable
 /// assets. Unknown fields are ignored, so producers can include additional
-/// metadata such as `app_id`, `channel`, `release_url`, or platform-specific
+/// metadata such as `app_id`, `channel`, or platform-specific
 /// compatibility fields.
 ///
 /// Required manifest fields are `version` and `assets`; required asset fields
@@ -202,6 +204,8 @@ impl UpdateSource for StaticManifestSource {
                 .clone()
                 .filter(|s| !s.trim().is_empty()),
             deltas,
+            published_at: manifest.published_at.as_deref().and_then(dates::rfc3339),
+            release_url: web_page_url(manifest.release_url.as_deref()),
         })
     }
 }
@@ -313,6 +317,12 @@ struct Manifest {
     notes: Option<String>,
     #[serde(default)]
     notes_url: Option<String>,
+    /// RFC 3339 time the release was published.
+    #[serde(default)]
+    published_at: Option<String>,
+    /// A web page about the release.
+    #[serde(default)]
+    release_url: Option<String>,
     /// RFC 3339 time after which the manifest must not be trusted.
     #[serde(default)]
     expires: Option<String>,

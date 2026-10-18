@@ -60,6 +60,10 @@ pub trait UpdateDriver: Any {
 /// flight any more.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "events are rare and short-lived; boxing `Found` would only add API churn"
+)]
 pub enum DriverEvent {
     /// A check started.
     Checking,

@@ -41,7 +41,7 @@ pub(super) fn check_expiry(expires: &str, now: SystemTime) -> Result<()> {
 
 /// Seconds since the Unix epoch for an RFC 3339 date-time. Fractional seconds
 /// are dropped.
-fn unix_seconds(text: &str) -> Option<i64> {
+pub(super) fn unix_seconds(text: &str) -> Option<i64> {
     let (date, rest) = text.trim().split_once(['T', 't', ' '])?;
     let (clock, offset) = split_offset(rest)?;
     let [year, month, day] = fields(date, '-')?;
@@ -78,7 +78,7 @@ fn fields(text: &str, sep: char) -> Option<[i64; 3]> {
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
 /// `days_from_civil`).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(super) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
     let year_of_era = year - era * 400;

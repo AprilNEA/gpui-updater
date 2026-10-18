@@ -12,10 +12,10 @@ mod tests;
 
 use semver::Version;
 
-use super::UpdateSource;
+use super::{UpdateSource, dates};
 use crate::error::{Error, Result};
 use crate::http::{self, Metadata};
-use crate::release::{Asset, Release, parse_version_lenient};
+use crate::release::{Asset, Release, parse_version_lenient, web_page_url};
 
 use feed::{Enclosure, Item};
 use host::{HostFacts, OsMatcher};
@@ -244,6 +244,8 @@ impl AppcastSource {
         release.notes = item.description.or(item.release_notes_link);
         release.ed25519_signature = enclosure.ed_signature;
         release.sha256 = enclosure.sha256;
+        release.published_at = item.pub_date.as_deref().and_then(dates::rfc2822);
+        release.release_url = web_page_url(item.link.as_deref());
         Some(release)
     }
 }

@@ -151,6 +151,8 @@ fn rejects_unknown_schema_version() {
         version: "1.0.0".to_string(),
         notes: None,
         notes_url: None,
+        published_at: None,
+        release_url: None,
         expires: None,
         assets: Vec::new(),
     };
@@ -270,4 +272,35 @@ fn rejects_an_expired_manifest() {
             Err(Error::ManifestExpired { .. })
         ));
     }
+}
+
+#[test]
+fn maps_the_publication_time_and_release_page() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let body = r#"{"version":"1.2.0","published_at":"2026-10-11T12:34:56Z",
+        "release_url":" https://example.com/releases/1.2.0 ",
+        "assets":[{"name":"App.dmg","url":"https://dl.example.com/App.dmg"}]}"#;
+    let odd = body
+        .replace("https://example.com/releases/1.2.0", "javascript:alert(1)")
+        .replace("2026-10-11T12:34:56Z", "soon");
+    let base = serve(vec![
+        ("/latest.json", body.as_bytes().to_vec()),
+        ("/odd.json", odd.into_bytes()),
+    ]);
+    let release = source(&base, &[]).fetch_latest().unwrap();
+    assert_eq!(
+        release.published_at,
+        Some(UNIX_EPOCH + Duration::from_secs(1_791_722_096))
+    );
+    assert_eq!(
+        release.release_url.as_deref(),
+        Some("https://example.com/releases/1.2.0")
+    );
+    // Neither is a security input: a bad value is dropped, not an error.
+    let odd = StaticManifestSource::new(format!("{base}/odd.json"))
+        .asset_patterns(pats(&["app"]))
+        .fetch_latest()
+        .unwrap();
+    assert_eq!(odd.published_at, None);
+    assert_eq!(odd.release_url, None);
 }

@@ -1,5 +1,7 @@
 //! Release metadata shared across update sources.
 
+use std::time::SystemTime;
+
 use semver::Version;
 
 use crate::error::{Error, Result};
@@ -64,6 +66,12 @@ pub struct Release {
     /// Empty when the source publishes none. Used only with the `delta` feature;
     /// the full `asset` remains the fallback.
     pub deltas: Vec<DeltaAsset>,
+    /// When the release was published, when the source says so. For display
+    /// only; nothing in the engine depends on it.
+    pub published_at: Option<SystemTime>,
+    /// A web page about the release, such as its GitHub release page, for a
+    /// "View release" link. The built-in sources keep only `http(s)` URLs.
+    pub release_url: Option<String>,
 }
 
 impl Release {
@@ -79,6 +87,8 @@ impl Release {
             sha256: None,
             ed25519_signature: None,
             deltas: Vec::new(),
+            published_at: None,
+            release_url: None,
         }
     }
 
@@ -125,6 +135,34 @@ impl Release {
         self.deltas = deltas;
         self
     }
+
+    /// Attach the time the release was published.
+    #[must_use]
+    pub fn with_published_at(mut self, published_at: SystemTime) -> Self {
+        self.published_at = Some(published_at);
+        self
+    }
+
+    /// Attach the URL of a web page about the release. Pass an `http(s)` URL:
+    /// apps typically open it in a browser.
+    #[must_use]
+    pub fn with_release_url(mut self, url: impl Into<String>) -> Self {
+        self.release_url = Some(url.into());
+        self
+    }
+}
+
+/// `url`, trimmed, if it is an `http://` or `https://` URL a browser can open.
+/// Anything else — blank, `file:`, `javascript:` — is dropped, because apps
+/// hand this URL to the system browser.
+pub(crate) fn web_page_url(url: Option<&str>) -> Option<String> {
+    let url = url?.trim();
+    let scheme = url.split_once("://").map(|(scheme, _)| scheme)?;
+    let web = scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http");
+    if !web {
+        tracing::debug!(url, "ignoring a release page that is not an http(s) URL");
+    }
+    web.then(|| url.to_string())
 }
 
 /// A binary delta that upgrades one specific installed version to another.
@@ -225,8 +263,30 @@ pub fn parse_version_lenient(version: &str) -> Result<Version> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Asset, Release, parse_tag, parse_version_lenient};
+    use super::{Asset, Release, parse_tag, parse_version_lenient, web_page_url};
     use semver::Version;
+
+    #[test]
+    fn keeps_only_web_page_urls() {
+        assert_eq!(
+            web_page_url(Some(" https://a.example/x ")).as_deref(),
+            Some("https://a.example/x")
+        );
+        assert_eq!(
+            web_page_url(Some("HTTP://a.example")).as_deref(),
+            Some("HTTP://a.example")
+        );
+        for bad in [
+            None,
+            Some(""),
+            Some("javascript:alert(1)"),
+            Some("file:///etc/passwd"),
+            Some("ftp://a.example/x"),
+            Some("/releases/1.2.0"),
+        ] {
+            assert_eq!(web_page_url(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn parses_v_prefixed_and_bare_tags() {

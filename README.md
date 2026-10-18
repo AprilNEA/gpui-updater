@@ -285,6 +285,13 @@ https://dl.example.com/
 `signature_url` are present, the inline signature is used. `expires` only
 matters for a signed manifest; see there too.
 
+`published_at` (RFC 3339) and `release_url` fill `Release::published_at` and
+`Release::release_url`, for a "published on" line and a "View release" link.
+Both are for display only. A `published_at` that does not parse, or a
+`release_url` that is not an `http(s)` URL, is dropped; the check does not
+fail. `GitHubSource` fills the same fields from the release's `published_at`
+and `html_url`, and `AppcastSource` from the item's `<pubDate>` and `<link>`.
+
 Asset selection is explicit when you use `os`, `arch`, and `format`:
 
 ```rust
@@ -575,6 +582,9 @@ let engine = UpdateEngine::new(
   `sparkle:informationalUpdate` are honoured. Enclosures are matched on
   `sparkle:os` (`macos` when absent; WinSparkle's `windows-x64` etc. on
   Windows; `linux-x64` / `linux-arm64` / `linux` on Linux).
+- **Display fields** — the item's `<pubDate>` (RFC 2822) becomes
+  `Release::published_at`, and its `<link>` becomes `Release::release_url`
+  when it is an `http(s)` URL.
 - **Not supported** — Sparkle's own delta updates (`sparkle:deltas`), phased rollouts, critical updates, and
   verifying Sparkle 2.10's signed-feed comment; the engine always downloads the
   full archive. On macOS the engine installs only `.dmg` enclosures (a `.zip`

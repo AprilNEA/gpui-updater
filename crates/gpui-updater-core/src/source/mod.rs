@@ -6,6 +6,7 @@
 //! yourself to read from a self-hosted endpoint, GitLab, etc.
 
 mod appcast;
+mod dates;
 mod github;
 mod manifest;
 mod trust;

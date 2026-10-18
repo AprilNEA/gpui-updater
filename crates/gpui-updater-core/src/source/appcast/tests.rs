@@ -329,3 +329,32 @@ fn reads_product_version_from_system_version_plist() {
     );
     assert_eq!(product_version_from_plist("<plist><dict/></plist>"), None);
 }
+
+#[test]
+fn maps_the_pub_date_and_link() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let xml = feed_of(&item(
+        "1.2.0",
+        "<pubDate>Sun, 11 Oct 2026 20:34:56 +0800</pubDate>
+         <link>https://example.test/releases/1.2.0</link>",
+        "",
+    ));
+    let release = pick(&mac_source(), &xml, &host(None, true)).unwrap();
+    assert_eq!(
+        release.published_at,
+        Some(UNIX_EPOCH + Duration::from_secs(1_791_722_096))
+    );
+    assert_eq!(
+        release.release_url.as_deref(),
+        Some("https://example.test/releases/1.2.0")
+    );
+    // A bad date or a non-web link is dropped, not an error.
+    let xml = feed_of(&item(
+        "1.2.0",
+        "<pubDate>someday</pubDate><link>file:///etc/passwd</link>",
+        "",
+    ));
+    let release = pick(&mac_source(), &xml, &host(None, true)).unwrap();
+    assert_eq!(release.published_at, None);
+    assert_eq!(release.release_url, None);
+}
