@@ -48,6 +48,7 @@ misconfigured (missing `SUPublicEDKey` / `SUFeedURL`, or not Sparkle 2).
 | `check` | `-[SPUUpdater checkForUpdates]`, which shows Sparkle's UI |
 | `download_and_install` | `-[SPUUpdater checkForUpdates]`, which brings the found update forward |
 | `restart` | Under `StagedUpdatePolicy::HostRelaunches`, Sparkle's immediate-install block; otherwise `checkForUpdates`, which shows Sparkle's "ready to install" prompt |
+| `cancel` | Nothing. Sparkle's own window has the cancel button. |
 
 Sparkle's updater delegate callbacks become `UpdateStatus` changes:
 

@@ -17,9 +17,9 @@ mod policy;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
@@ -27,6 +27,7 @@ use ureq::tls::{RootCerts, TlsConfig};
 use policy::Transport;
 pub(crate) use policy::{Metadata, ensure_secure};
 
+use crate::cancel::{self, CancelToken};
 use crate::error::{Error, Result};
 
 /// `User-Agent` sent on every request. GitHub rejects API requests without one.
@@ -250,6 +251,8 @@ pub(crate) struct Fetch<'a> {
     pub(crate) expected_len: Option<u64>,
     /// The most bytes accepted, whether or not a size was published.
     pub(crate) max_len: u64,
+    /// Stops the download when cancelled.
+    pub(crate) cancel: Option<&'a CancelToken>,
 }
 
 impl<'a> Fetch<'a> {
@@ -259,6 +262,30 @@ impl<'a> Fetch<'a> {
             headers: &[],
             expected_len: None,
             max_len: u64::MAX,
+            cancel: None,
+        }
+    }
+
+    /// Stop the download, with [`Error::Cancelled`], once `cancel` is
+    /// cancelled.
+    pub(crate) fn cancel(self, cancel: &'a CancelToken) -> Self {
+        Self {
+            cancel: Some(cancel),
+            ..self
+        }
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        self.cancel.map_or(Ok(()), CancelToken::check)
+    }
+
+    /// Wait `duration` before a retry, or less if cancelled.
+    fn pause(&self, duration: Duration) -> Result<()> {
+        if let Some(cancel) = self.cancel {
+            cancel.sleep(duration)
+        } else {
+            thread::sleep(duration);
+            Ok(())
         }
     }
 
@@ -299,7 +326,8 @@ struct Transfer<'a> {
 /// by `ureq` automatically, but never to plain HTTP. A transient transport
 /// failure — at connect or mid-stream — restarts the download from byte zero
 /// (the partial file is truncated and `progress` resets), up to
-/// [`MAX_RETRIES`] times.
+/// [`MAX_RETRIES`] times. A cancelled download fails with
+/// [`Error::Cancelled`] and removes the partial file.
 pub(crate) fn download(
     fetch: &Fetch<'_>,
     dest: &Path,
@@ -327,12 +355,28 @@ fn download_with(
             fetch.url, fetch.max_len
         )));
     }
+    let result = retry_download(transfer, fetch, dest, &mut progress);
+    if matches!(result, Err(Error::Cancelled)) {
+        // Nothing resumes a cancelled download, so its partial body is waste.
+        let _ = std::fs::remove_file(dest);
+    }
+    result
+}
+
+fn retry_download(
+    transfer: Transfer<'_>,
+    fetch: &Fetch<'_>,
+    dest: &Path,
+    progress: &mut impl FnMut(u64, Option<u64>),
+) -> Result<()> {
     let mut tries: u32 = 0;
     loop {
-        match download_once(transfer, fetch, dest, &mut progress) {
+        fetch.check_cancelled()?;
+        match download_once(transfer, fetch, dest, progress) {
             Ok(()) => return Ok(()),
+            Err((Error::Cancelled, _)) => return Err(Error::Cancelled),
             Err((_, transient)) if transient && tries < MAX_RETRIES => {
-                thread::sleep(backoff(tries));
+                fetch.pause(backoff(tries))?;
                 tries += 1;
                 progress(0, None);
             }
@@ -369,13 +413,30 @@ fn call_with_deadline(
         }
         let _ = tx.send(req.call());
     });
-    match rx.recv_timeout(deadline) {
-        Ok(Ok(resp)) => Ok(resp),
-        Ok(Err(e)) => {
+    // Wait in short slices, so a cancel does not wait out the deadline.
+    let started = Instant::now();
+    let received = loop {
+        let left = deadline.saturating_sub(started.elapsed());
+        match rx.recv_timeout(left.min(cancel::POLL)) {
+            Ok(received) => break Some(received),
+            Err(RecvTimeoutError::Disconnected) => break None,
+            Err(RecvTimeoutError::Timeout) => {
+                if fetch.check_cancelled().is_err() {
+                    return Err((Error::Cancelled, false));
+                }
+                if left.is_zero() {
+                    break None;
+                }
+            }
+        }
+    };
+    match received {
+        Some(Ok(resp)) => Ok(resp),
+        Some(Err(e)) => {
             let transient = is_transient(&e);
             Err((http_err(e), transient))
         }
-        Err(_) => Err((
+        None => Err((
             Error::Http(format!("GET {url} -> no response within {deadline:?}")),
             true,
         )),
@@ -438,6 +499,9 @@ fn download_once(
     let mut buf = vec![0u8; 64 * 1024];
     let mut downloaded = 0u64;
     loop {
+        if fetch.check_cancelled().is_err() {
+            return Err((Error::Cancelled, false));
+        }
         let n = reader.read(&mut buf).map_err(|e| (Error::Io(e), true))?;
         if n == 0 {
             break;

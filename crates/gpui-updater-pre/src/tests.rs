@@ -371,8 +371,45 @@ fn dropping_during_progress_stops_foreground_but_keeps_download(cx: &mut TestApp
         std::fs::read(downloads.join("update.tar.gz")).unwrap(),
         body
     );
-    // This tests cancellation before install starts. A synchronous install
-    // already running cannot be interrupted or rolled back by dropping Task.
+    // The download finished before the drop, so its file stays; a drop during
+    // the download would cancel it. A synchronous install already running
+    // cannot be interrupted or rolled back by dropping Task.
+}
+
+#[gpui::test]
+fn cancel_returns_the_download_to_available(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (updater, _) = updater(
+        cx,
+        vec![Ok(release(2))],
+        EngineConfig::new(Version::new(1, 0, 0)).download_dir(dir.path().join("downloads")),
+    );
+    // Nothing is downloading yet, so this changes nothing.
+    updater.update(cx, super::Updater::cancel);
+    updater.update(cx, super::Updater::check);
+    cx.run_until_parked();
+    let states = observe(cx, &updater);
+    updater.update(cx, |u, cx| {
+        u.download_and_install(cx);
+        // The background download has not run yet, so it never connects.
+        u.cancel(cx);
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(120));
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let u = updater.read(cx);
+        assert_eq!(u.status(), &UpdateStatus::Available(Version::new(2, 0, 0)));
+        assert_eq!(u.available().unwrap().version, Version::new(2, 0, 0));
+        assert!(u.task.is_none());
+        assert!(u.cancel.is_none());
+    });
+    let states = states.borrow();
+    assert!(
+        !states.iter().any(|s| matches!(s, UpdateStatus::Errored(_))),
+        "{states:?}"
+    );
+    assert!(!states.contains(&UpdateStatus::Installing));
 }
 
 /// Records the calls an `Updater` forwards; the test emits events through the
@@ -400,6 +437,10 @@ impl UpdateDriver for FakeDriver {
     fn relaunch(&mut self) {
         self.calls.borrow_mut().push("relaunch");
     }
+
+    fn cancel(&mut self) {
+        self.calls.borrow_mut().push("cancel");
+    }
 }
 
 type Calls = Rc<RefCell<Vec<&'static str>>>;
@@ -421,8 +462,12 @@ fn driver_is_started_and_calls_are_forwarded_even_while_busy(cx: &mut TestAppCon
         u.check(cx);
         u.download_and_install(cx);
         u.restart(cx);
+        u.cancel(cx);
     });
-    assert_eq!(*calls.borrow(), ["start", "check", "install", "relaunch"]);
+    assert_eq!(
+        *calls.borrow(),
+        ["start", "check", "install", "relaunch", "cancel"]
+    );
     cx.read(|cx| {
         let u = updater.read(cx);
         assert!(u.is_driver_backed());

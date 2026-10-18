@@ -57,13 +57,16 @@ type BoxedEngine = UpdateEngine<Box<dyn UpdateSource>>;
 /// [`UpdateDriver`]. A driver may also check on its own schedule (Sparkle
 /// does when automatic checks are on).
 ///
-/// Dropping the entity cancels its foreground task, not an already-running
-/// blocking download or install. It does not roll back an installation.
+/// Dropping the entity cancels a running download (as
+/// [`cancel`](Self::cancel) does), but not an install that has started. It
+/// does not roll back an installation.
 pub struct Updater {
     status: UpdateStatus,
     available: Option<Release>,
     backend: Backend,
     task: Option<Task<()>>,
+    /// Stops the download in progress, if any.
+    cancel: Option<CancelToken>,
 }
 
 enum Backend {
@@ -85,6 +88,7 @@ impl Updater {
             available: None,
             backend: Backend::Engine(Arc::new(engine)),
             task: None,
+            cancel: None,
         }
     }
 
@@ -119,6 +123,7 @@ impl Updater {
                 _events: events,
             },
             task: None,
+            cancel: None,
         }
     }
 
@@ -257,6 +262,8 @@ impl Updater {
         let Some(release) = self.available.clone() else {
             return;
         };
+        let cancel = CancelToken::new();
+        self.cancel = Some(cancel.clone());
         self.set_status(
             UpdateStatus::Downloading {
                 downloaded: 0,
@@ -276,7 +283,7 @@ impl Updater {
                 let (engine, release) = (engine.clone(), release.clone());
                 let (d, t, fin) = (downloaded.clone(), total.clone(), done.clone());
                 cx.background_executor().spawn(async move {
-                    let result = engine.download(&release, |got, tot| {
+                    let result = engine.download_cancellable(&release, &cancel, |got, tot| {
                         d.store(got, Ordering::Relaxed);
                         t.store(tot.unwrap_or(0), Ordering::Relaxed);
                     });
@@ -311,15 +318,20 @@ impl Updater {
                 Err(e) => {
                     this.update(cx, |this, cx| {
                         this.task = None;
-                        this.set_status(UpdateStatus::Errored(e.into()), cx);
+                        this.cancel = None;
+                        this.set_status(download_failed(e, release.version.clone()), cx);
                     })
                     .ok();
                     return;
                 }
             };
 
-            this.update(cx, |this, cx| this.set_status(UpdateStatus::Installing, cx))
-                .ok();
+            // An install cannot be cancelled.
+            this.update(cx, |this, cx| {
+                this.cancel = None;
+                this.set_status(UpdateStatus::Installing, cx);
+            })
+            .ok();
 
             let installed = {
                 let engine = engine.clone();
@@ -338,6 +350,24 @@ impl Updater {
         }));
     }
 
+    /// Stop the download in progress.
+    ///
+    /// With the engine the download stops at its next checkpoint (see
+    /// [`CancelToken`]), removes its partial file, and the status returns to
+    /// [`UpdateStatus::Available`]. An install that has started is not
+    /// stopped, and a call while nothing is downloading does nothing. With a
+    /// driver this forwards to [`UpdateDriver::cancel`].
+    pub fn cancel(&mut self, _cx: &mut Context<Self>) {
+        match &mut self.backend {
+            Backend::Driver { driver, .. } => driver.cancel(),
+            Backend::Engine(_) => {
+                if let Some(cancel) = &self.cancel {
+                    cancel.cancel();
+                }
+            }
+        }
+    }
+
     /// Relaunch into the staged update.
     ///
     /// With the engine this uses the restart path set during
@@ -353,6 +383,26 @@ impl Updater {
 
 // Official GPUI 0.2.2's TestPlatform discards restart paths. Keep the handoff
 // isolated so its exact path and error/None behavior can be tested safely.
+/// The status after a download that failed with `error`. Cancelling is not a
+/// failure: the update is still there to download.
+fn download_failed(error: Error, version: Version) -> UpdateStatus {
+    if error.kind() == ErrorKind::Cancelled {
+        UpdateStatus::Available(version)
+    } else {
+        UpdateStatus::Errored(error.into())
+    }
+}
+
+impl Drop for Updater {
+    fn drop(&mut self) {
+        // Dropping the entity drops its foreground task, but the blocking
+        // download runs on a background thread and only stops when told to.
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+    }
+}
+
 fn installed_status(
     installed: Result<Installed>,
     version: Version,

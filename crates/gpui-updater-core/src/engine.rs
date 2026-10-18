@@ -21,6 +21,7 @@ pub use config::{
     Verification, VersionBinding,
 };
 
+use crate::cancel::CancelToken;
 use crate::error::Result;
 use crate::http::{self, Fetch};
 use crate::install::{self, Installed};
@@ -92,6 +93,9 @@ impl<S: UpdateSource> UpdateEngine<S> {
     /// `progress` is called as `(downloaded_bytes, total_bytes)`. After a failed
     /// delta attempt it restarts from zero for the full download.
     ///
+    /// To stop a download from another thread, use
+    /// [`download_cancellable`](Self::download_cancellable).
+    ///
     /// # Errors
     /// Returns an error on download failure, if verification fails, or if the
     /// policy requires a check the release cannot satisfy
@@ -99,11 +103,30 @@ impl<S: UpdateSource> UpdateEngine<S> {
     pub fn download(
         &self,
         release: &Release,
+        progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<Artifact> {
+        self.download_cancellable(release, &CancelToken::new(), progress)
+    }
+
+    /// [`download`](Self::download), stopping with
+    /// [`Error::Cancelled`](crate::Error::Cancelled) once `cancel` is
+    /// cancelled. See [`CancelToken`] for when a cancel takes effect. A
+    /// cancelled download removes its partial file; a delta attempt that is
+    /// cancelled does not fall back to the full download.
+    ///
+    /// # Errors
+    /// As [`download`](Self::download), plus
+    /// [`Error::Cancelled`](crate::Error::Cancelled).
+    pub fn download_cancellable(
+        &self,
+        release: &Release,
+        cancel: &CancelToken,
         mut progress: impl FnMut(u64, Option<u64>),
     ) -> Result<Artifact> {
+        cancel.check()?;
         let dir = self.download_dir()?;
         #[cfg(feature = "delta")]
-        if let Some(rebuilt) = self.try_deltas(release, &dir, &mut progress) {
+        if let Some(rebuilt) = self.try_deltas(release, &dir, cancel, &mut progress) {
             match self.check_payload(&rebuilt, release) {
                 Ok(()) => return Ok(Artifact::verified(rebuilt)),
                 Err(e) => {
@@ -112,12 +135,16 @@ impl<S: UpdateSource> UpdateEngine<S> {
                 }
             }
         }
+        // A delta attempt that was cancelled must not turn into a full download.
+        cancel.check()?;
         // The name comes from release metadata; keep the file inside `dir`.
         let artifact = dir.join(staging::safe_file_name(&release.asset.name, "update"));
         let fetch = Fetch::new(&release.asset.url)
             .expect_len(release.asset.size)
-            .max_len(self.config.max_download_size);
+            .max_len(self.config.max_download_size)
+            .cancel(cancel);
         http::download(&fetch, &artifact, &mut progress)?;
+        cancel.check()?;
         self.config
             .verify_file(&artifact, Integrity::of_release(release), &release.version)?;
         self.check_payload(&artifact, release)?;

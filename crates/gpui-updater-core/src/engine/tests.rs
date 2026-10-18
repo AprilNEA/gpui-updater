@@ -399,3 +399,28 @@ fn download_dirs_are_private_to_the_user() {
     assert_eq!(mode(&custom), 0o700);
     assert_eq!(mode(&parent.path().join("updates")), 0o700);
 }
+
+#[test]
+fn a_cancelled_download_leaves_nothing_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = dir.path().join("downloads");
+    let url = serve(b"artifact");
+    let engine = UpdateEngine::new(
+        PanicSource,
+        config(Verification::Off, None).download_dir(&downloads),
+    );
+    let mut wanted = release(None, None, None);
+    wanted.asset = Asset::new("app.dmg", url.as_str(), 0);
+    let cancelled = CancelToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        engine.download_cancellable(&wanted, &cancelled, |_, _| {}),
+        Err(Error::Cancelled)
+    ));
+    assert!(!downloads.join("app.dmg").exists());
+    // A fresh token downloads as before.
+    let artifact = engine
+        .download_cancellable(&wanted, &CancelToken::new(), |_, _| {})
+        .unwrap();
+    assert_eq!(std::fs::read(artifact.path()).unwrap(), b"artifact");
+}

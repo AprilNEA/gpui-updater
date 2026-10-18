@@ -60,6 +60,7 @@
 // Panicking on failure is the point of a test assertion.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod cancel;
 mod engine;
 mod error;
 mod http;
@@ -74,6 +75,7 @@ pub mod install;
 pub mod source;
 pub mod verify;
 
+pub use cancel::CancelToken;
 pub use driver::{DriverEvent, DriverEvents, UpdateDriver};
 pub use engine::{
     Artifact, BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, DEFAULT_MAX_DOWNLOAD_SIZE,

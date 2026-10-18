@@ -440,3 +440,84 @@ fn classifies_transient_versus_permanent() {
     assert!(!is_transient(&Error::StatusCode(404)));
     assert!(!is_transient(&Error::StatusCode(403)));
 }
+
+/// Cancel `token` from another thread after `delay`.
+fn cancel_after(token: &CancelToken, delay: Duration) {
+    let token = token.clone();
+    thread::spawn(move || {
+        thread::sleep(delay);
+        token.cancel();
+    });
+}
+
+#[test]
+fn cancel_stops_the_body_and_removes_the_partial_file() {
+    let addr = spawn_server(Fault::TrickleBody, usize::MAX);
+    let url = format!("http://{addr}/update.bin");
+    let dest = temp_dest("cancel-body");
+    let token = CancelToken::new();
+    let started = Instant::now();
+    let result = download(&Fetch::new(&url).cancel(&token), &dest, |got, _| {
+        if got > 0 {
+            token.cancel();
+        }
+    });
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    assert!(!dest.exists(), "the partial file must be removed");
+    // The whole trickled body would take ~1.2s.
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn cancel_interrupts_the_wait_for_response_headers() {
+    let addr = spawn_server(Fault::SilentAfterRequest, usize::MAX);
+    let url = format!("http://{addr}/update.bin");
+    let dest = temp_dest("cancel-headers");
+    let token = CancelToken::new();
+    cancel_after(&token, Duration::from_millis(200));
+    let started = Instant::now();
+    // The default pre-body deadline is a minute; the cancel must not wait it out.
+    let result = download(&Fetch::new(&url).cancel(&token), &dest, |_, _| {});
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn cancel_interrupts_the_retry_backoff() {
+    let addr = spawn_server(Fault::Status503, usize::MAX);
+    let url = format!("http://{addr}/update.bin");
+    let dest = temp_dest("cancel-backoff");
+    let token = CancelToken::new();
+    cancel_after(&token, Duration::from_millis(300));
+    let started = Instant::now();
+    // Five backoffs add up to more than 11 seconds.
+    let result = download(&Fetch::new(&url).cancel(&token), &dest, |_, _| {});
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_cancelled_token_stops_before_connecting() {
+    let token = CancelToken::new();
+    token.cancel();
+    let dest = temp_dest("cancel-early");
+    // Nothing listens on port 9; a request would fail with a network error.
+    let result = download(
+        &Fetch::new("http://127.0.0.1:9/update.bin").cancel(&token),
+        &dest,
+        |_, _| {},
+    );
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+}

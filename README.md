@@ -612,6 +612,7 @@ cx.observe(&updater, |_, _, cx| cx.notify()).detach();
 // Drive it from buttons:
 updater.update(cx, |u, cx| u.check(cx));
 // when status is Available → u.download_and_install(cx)
+// when status is Downloading → u.cancel(cx)
 // when status is Staged → u.restart(cx)
 ```
 
@@ -638,9 +639,17 @@ Downloading { downloaded, total } → Installing → Staged(v) | Errored(error)`
 
 The engine's `Error::kind()` returns the same classification.
 
-Keep the entity alive while updating. Dropping it cancels its foreground task,
-but does not interrupt an already-running blocking download/install or roll it
-back. A completed download may remain on disk. A check that finds no newer
+`cancel` stops a download. The status returns to `Available(v)`, not
+`Errored`, and the partial file is removed. The download stops at its next
+checkpoint: after each 64 KiB of the body, during a retry wait, or while it
+waits for response headers. A body read that has stalled can take up to the
+30-second stall timeout. An install that has started cannot be cancelled.
+Without the entity, pass a `CancelToken` to
+`UpdateEngine::download_cancellable`.
+
+Keep the entity alive while updating. Dropping it cancels a running download,
+as `cancel` does, but does not interrupt an install that has started or roll
+it back. A completed download may remain on disk. A check that finds no newer
 release or fails retains the previous `available()` release, as in 0.0.x.
 
 ### Sparkle on macOS

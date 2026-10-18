@@ -51,6 +51,13 @@ pub trait UpdateDriver: Any {
     /// The user asked to relaunch into the update the driver last reported with
     /// [`DriverEvent::ReadyToRelaunch`].
     fn relaunch(&mut self);
+
+    /// The user asked to stop the download in progress. Report
+    /// [`DriverEvent::Settled`] once it has stopped.
+    ///
+    /// The default does nothing: not every external updater can stop a
+    /// download from outside its own interface.
+    fn cancel(&mut self) {}
 }
 
 /// Something an [`UpdateDriver`] wants the app to know.

@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use super::UpdateEngine;
 use super::config::Integrity;
+use crate::cancel::CancelToken;
 use crate::delta::{self, Route};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::http::{self, Fetch};
 use crate::release::{DeltaAsset, Release};
 use crate::source::UpdateSource;
@@ -19,6 +20,7 @@ impl<S: UpdateSource> UpdateEngine<S> {
         &self,
         release: &Release,
         dir: &Path,
+        cancel: &CancelToken,
         progress: &mut impl FnMut(u64, Option<u64>),
     ) -> Option<PathBuf> {
         if !self.config.deltas || !cfg!(any(target_os = "macos", target_os = "linux")) {
@@ -27,10 +29,14 @@ impl<S: UpdateSource> UpdateEngine<S> {
         let from = &self.config.current_version;
         let chain = self.plan(release)?;
         let hops = chain.len();
-        match self.apply_chain(&chain, dir, progress) {
+        match self.apply_chain(&chain, dir, cancel, progress) {
             Ok(rebuilt) => {
                 tracing::info!(%from, to = %release.version, hops, "rebuilt update from deltas");
                 Some(rebuilt)
+            }
+            Err(e) if e.kind() == ErrorKind::Cancelled => {
+                tracing::debug!(%from, to = %release.version, "delta update cancelled");
+                None
             }
             Err(e) => {
                 tracing::warn!(
@@ -75,6 +81,7 @@ impl<S: UpdateSource> UpdateEngine<S> {
         &self,
         chain: &[&DeltaAsset],
         dir: &Path,
+        cancel: &CancelToken,
         progress: &mut impl FnMut(u64, Option<u64>),
     ) -> Result<PathBuf> {
         let installed = self.install_root()?;
@@ -92,8 +99,11 @@ impl<S: UpdateSource> UpdateEngine<S> {
         let mut done = 0u64;
         for hop in chain {
             let out_dir = dir.join(format!("delta-{}", hop.to));
-            let result = self.apply_hop(hop, (&base, &out_dir.join(&name)), dir, &mut |got, _| {
-                progress(done + got, total);
+            let result = cancel.check().and_then(|()| {
+                let paths = (base.as_path(), out_dir.join(&name));
+                self.apply_hop(hop, (paths.0, &paths.1), dir, cancel, &mut |got, _| {
+                    progress(done + got, total);
+                })
             });
             // Each intermediate tree is only needed as the next hop's base.
             if let Some(previous) = previous_out.take() {
@@ -117,13 +127,15 @@ impl<S: UpdateSource> UpdateEngine<S> {
         hop: &DeltaAsset,
         (base, out): (&Path, &Path),
         dir: &Path,
+        cancel: &CancelToken,
         progress: &mut impl FnMut(u64, Option<u64>),
     ) -> Result<()> {
         let file = dir.join(safe_file_name(&hop.asset.name, "update.delta"));
         let result = (|| {
             let fetch = Fetch::new(&hop.asset.url)
                 .expect_len(hop.asset.size)
-                .max_len(self.config.max_download_size);
+                .max_len(self.config.max_download_size)
+                .cancel(cancel);
             http::download(&fetch, &file, &mut *progress)?;
             self.config
                 .verify_file(&file, Integrity::of_delta(hop), &hop.to)?;
