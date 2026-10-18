@@ -6,6 +6,7 @@ use semver::Version;
 
 use crate::error::{Error, Result};
 use crate::http::{self, HttpOptions, Metadata};
+use crate::install::InstallOptions;
 use crate::release::{DeltaAsset, Release};
 use crate::verify;
 
@@ -89,18 +90,28 @@ pub enum VersionBinding {
     Required,
 }
 
-/// Which code signature the app bundle of an update must carry (macOS).
+/// Which code signature an update must carry: the app bundle's on macOS, the
+/// `.exe` or `.msi` Authenticode signature on Windows. Linux has no platform
+/// code signature, so nothing is checked there.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum CodeSigning {
-    /// When the installed app is signed by a team, require the update to pass
-    /// `codesign --verify --deep --strict` and be signed by the same team.
-    /// Unsigned and ad-hoc signed installations are not checked.
+    /// Require the update to be signed like the installed app, when the
+    /// installed app is signed. On macOS, a team-signed app needs an update
+    /// that passes `codesign --verify --deep --strict` and is signed by the
+    /// same team; unsigned and ad-hoc signed apps are not checked. On Windows,
+    /// an app with a valid Authenticode signature needs an update with a valid
+    /// signature whose certificate has the same common name (CN); unsigned
+    /// apps are not checked.
     #[default]
     MatchInstalled,
     /// Require a valid signature by this Team ID, whatever the installed app
-    /// carries.
+    /// carries (macOS; ignored on Windows).
     TeamId(String),
+    /// Require a valid Authenticode signature whose certificate's common name
+    /// (CN) is this publisher name, such as `Example Corp`, whatever the
+    /// installed app carries (Windows; ignored on macOS).
+    Publisher(String),
     /// Do not check code signatures.
     Off,
 }
@@ -163,6 +174,9 @@ pub struct EngineConfig {
     /// Extra headers and the proxy for artifacts, deltas, and their
     /// checksum and signature files. Sources have their own.
     pub http: HttpOptions,
+    /// How [`UpdateEngine::install`](crate::UpdateEngine::install) installs
+    /// the update, such as the Windows Installer UI for an `.msi`.
+    pub install_options: InstallOptions,
 }
 
 impl EngineConfig {
@@ -182,6 +196,7 @@ impl EngineConfig {
             deltas: true,
             max_delta_hops: DEFAULT_MAX_DELTA_HOPS,
             http: HttpOptions::new(),
+            install_options: InstallOptions::new(),
         }
     }
 
@@ -222,6 +237,14 @@ impl EngineConfig {
     #[must_use]
     pub fn code_signing(mut self, code_signing: CodeSigning) -> Self {
         self.code_signing = code_signing;
+        self
+    }
+
+    /// Set how updates are installed. Defaults to
+    /// [`InstallOptions::new`].
+    #[must_use]
+    pub fn install_options(mut self, options: InstallOptions) -> Self {
+        self.install_options = options;
         self
     }
 

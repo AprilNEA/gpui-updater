@@ -248,7 +248,20 @@ impl<S: UpdateSource> UpdateEngine<S> {
     /// # Errors
     /// Propagates install failures.
     pub fn install(&self, artifact: &Artifact) -> Result<Installed> {
-        install::install(artifact.path(), &self.install_root()?)
+        install::install_with(
+            artifact.path(),
+            &self.install_root()?,
+            &self.config.install_options,
+        )
+    }
+
+    /// Remove what an earlier install left beside the install root because
+    /// the old version was still running, such as the previous `.exe` on
+    /// Windows: see [`install::remove_leftovers`]. Call it at startup.
+    pub fn remove_leftovers(&self) {
+        if let Ok(root) = self.install_root() {
+            install::remove_leftovers(&root);
+        }
     }
 
     /// Run the full pipeline. Returns `Ok(None)` when already up to date.

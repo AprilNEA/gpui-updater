@@ -23,7 +23,8 @@ installer-shipped apps).
   Sparkle-compatible Ed25519 (`sparkle:edSignature` / `SUPublicEDKey`)
   signatures, with minisign key rotation and signatures bound to a version. On
   macOS the new `.app` must declare the release version and carry the
-  installed app's code-signing team. Static manifests can be signed and expire,
+  installed app's code-signing team; on Windows the `.exe` or `.msi` must
+  carry the installed app's Authenticode publisher. Static manifests can be signed and expire,
   so a stale one cannot be replayed. Everything is fetched over HTTPS with
   bounded sizes into a directory only the current user can access, but
   transport security alone is not trusted. See
@@ -43,8 +44,11 @@ installer-shipped apps).
     as an `AppImage` replaces the `.AppImage` file with the new one.
   - **Windows**: rename-in-place for a bare `.exe`, or a staged msiexec
     handoff for an `.msi` — the verified package is applied
-    (`/passive /norestart`) after the app exits, via the restart path, then
-    the app relaunches. (Restart-Manager integration for locked sibling DLLs
+    (`/passive /norestart` by default; `MsiUi` picks `/qb` or `/quiet`) after
+    the app exits, via the restart path, then the app relaunches. msiexec
+    logs to `<package>.log`; exit code 3010 (reboot needed) counts as
+    success. Call `UpdateEngine::remove_leftovers` at startup to delete the
+    `.old.exe` a bare-`.exe` update leaves behind. (Restart-Manager integration for locked sibling DLLs
     remains future work.)
 - **GPUI adapters** — an observable `Entity<Updater>` that
   runs the work on the background executor and sets `App::set_restart_path` when
@@ -114,7 +118,10 @@ Breaking changes:
 New, with no change needed: `Updater::cancel`, `CancelToken` with
 `UpdateEngine::download_cancellable`, `UpdateDriver::cancel` (defaults to
 doing nothing), `Release::published_at` / `release_url`, `HttpOptions`,
-`FallbackSource`, and `UpdateEngine::check_location` / `install::check_location`.
+`FallbackSource`, `UpdateEngine::check_location` / `install::check_location`,
+`CodeSigning::Publisher`, `InstallOptions` / `MsiUi` with
+`EngineConfig::install_options` and `install::install_with`, and
+`UpdateEngine::remove_leftovers` / `install::remove_leftovers`.
 
 Behavior changes:
 
@@ -130,6 +137,13 @@ Behavior changes:
 - On Linux, `current_install_root` returns the `AppImage` file when the app
   runs from inside its mount, not the executable in the read-only mount. An
   install root that is a directory is replaced as a whole.
+- On Windows, `CodeSigning::MatchInstalled` (the default) now checks
+  Authenticode: an app with a valid signature takes only updates signed by
+  the same publisher. Before, nothing was checked on Windows. Opt out with
+  `.code_signing(CodeSigning::Off)`.
+- The `.msi` apply script relaunches the app after exit code 3010 (installed,
+  reboot needed); before, it treated 3010 as a failure. It also writes
+  `<package>.log`.
 
 ### Migrating from 0.2
 
@@ -448,6 +462,19 @@ checks, in this order:
    bundle failing these checks falls back to the full download. Like
    Sparkle, this keeps a stolen minisign key alone from shipping someone
    else's app.
+6. **Authenticode (Windows).** When the installed `.exe` has a valid
+   Authenticode signature, the downloaded `.exe` or `.msi` must have a valid
+   one whose certificate has the same common name (CN), such as
+   `Example Corp` (`CodeSigning::MatchInstalled`, as electron-updater's
+   `publisherName`). Pin a publisher with `CodeSigning::Publisher("…")`.
+   An unsigned installed app is not checked. The check runs PowerShell's
+   `Get-AuthenticodeSignature`, so it accepts what Windows trusts, catalog
+   signatures included. When PowerShell cannot read a signature, of the
+   update or of the installed app, the download fails with `Error::Payload`
+   (`ErrorKind::Verification`) instead of skipping the check. Where
+   PowerShell is blocked, turn the check off with `CodeSigning::Off`.
+   Windows executables need not declare a version, so `BundleVersion` does
+   not apply.
 
 By default (`Verification::BestEffort`) checks 2 and 3 are skipped when their
 input is absent, so an unsigned release still installs. To **fail closed**,
@@ -800,9 +827,10 @@ reaches Sparkle's own settings (automatic checks and downloads).
   executable is inside `$APPDIR`. A program started from another `AppImage`,
   such as a terminal, inherits both variables; this check keeps it from
   replacing that other `AppImage`.
-- **Linux and Windows** have no bundle metadata to check, so
-  `BundleVersion` and `CodeSigning` only apply on macOS. Sign your artifacts
-  and bind signatures to versions there instead.
+- **Linux** has no bundle metadata or platform code signature to check, so
+  `BundleVersion` and `CodeSigning` do not apply there, and on Windows only
+  `CodeSigning` does. Sign your artifacts and bind signatures to versions
+  instead.
 - Adapters need their GPUI backend's native toolchain (including Xcode/Metal
   where required on macOS). Core does not need GPUI or a graphics toolchain.
 - **Linux with registry `gpui` 0.2.2**: libc 0.2.190 removed `ENOATTR`, which

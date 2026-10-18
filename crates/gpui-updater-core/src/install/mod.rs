@@ -37,6 +37,59 @@ pub struct Installed {
     pub restart_path: Option<PathBuf>,
 }
 
+/// How much of the Windows Installer UI an `.msi` update shows. The package
+/// installs after the app exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum MsiUi {
+    /// A progress bar and no questions (`/passive`).
+    #[default]
+    Passive,
+    /// The basic UI: progress, a Cancel button, and error dialogs (`/qb`).
+    Basic,
+    /// No UI at all (`/quiet`). A per-machine package cannot ask for
+    /// elevation then, so use it for per-user packages or an elevated app.
+    Quiet,
+}
+
+impl MsiUi {
+    /// The msiexec option for this UI level.
+    #[cfg_attr(
+        not(any(target_os = "windows", test)),
+        expect(dead_code, reason = "msiexec runs on Windows only")
+    )]
+    pub(crate) fn flag(self) -> &'static str {
+        match self {
+            Self::Passive => "/passive",
+            Self::Basic => "/qb",
+            Self::Quiet => "/quiet",
+        }
+    }
+}
+
+/// How [`install_with`] installs an update.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InstallOptions {
+    /// The Windows Installer UI for an `.msi` update.
+    pub msi_ui: MsiUi,
+}
+
+impl InstallOptions {
+    /// The defaults: [`MsiUi::Passive`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the Windows Installer UI for an `.msi` update.
+    #[must_use]
+    pub fn msi_ui(mut self, ui: MsiUi) -> Self {
+        self.msi_ui = ui;
+        self
+    }
+}
+
 /// Install a downloaded update artifact over `install_root`.
 ///
 /// - `artifact`: the downloaded file (`.dmg` on macOS, `.tar.gz` or
@@ -58,23 +111,50 @@ pub struct Installed {
 /// [`Error::UnsupportedPlatform`](crate::Error::UnsupportedPlatform) on
 /// platforms without an install strategy.
 pub fn install(artifact: &Path, install_root: &Path) -> Result<Installed> {
+    install_with(artifact, install_root, &InstallOptions::new())
+}
+
+/// [`install`] with `options`, such as the Windows Installer UI for an
+/// `.msi`.
+///
+/// # Errors
+/// As [`install`].
+pub fn install_with(
+    artifact: &Path,
+    install_root: &Path,
+    options: &InstallOptions,
+) -> Result<Installed> {
     #[cfg(target_os = "macos")]
     {
+        let _ = options;
         macos::install(artifact, install_root)
     }
     #[cfg(target_os = "linux")]
     {
+        let _ = options;
         linux::install(artifact, install_root)
     }
     #[cfg(target_os = "windows")]
     {
-        windows::install(artifact, install_root)
+        windows::install(artifact, install_root, options)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = (artifact, install_root);
+        let _ = (artifact, install_root, options);
         Err(crate::Error::UnsupportedPlatform(std::env::consts::OS))
     }
+}
+
+/// Remove what an earlier install left next to `install_root` because the
+/// old version was still running: on Windows, the previous executable
+/// (`<app>.old.exe`) that a bare-`.exe` install renames aside. Call it at
+/// startup. It does nothing when there is nothing to remove, and it ignores
+/// failures, because the next call tries again.
+pub fn remove_leftovers(install_root: &Path) {
+    #[cfg(target_os = "windows")]
+    windows::remove_leftovers(install_root);
+    #[cfg(not(target_os = "windows"))]
+    let _ = install_root;
 }
 
 /// Best-effort path of the currently installed application to replace.
@@ -183,6 +263,7 @@ fn probe_write(dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod location_tests {
     use super::*;
+    #[cfg(unix)]
     use crate::error::{Error, ErrorKind};
 
     #[test]
@@ -226,5 +307,22 @@ mod location_tests {
         let err = result.unwrap_err();
         assert!(matches!(err, Error::Permission(_)), "{err:?}");
         assert_eq!(err.kind(), ErrorKind::Permission);
+    }
+}
+
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+
+    #[test]
+    fn msi_ui_levels_map_to_msiexec_options() {
+        assert_eq!(InstallOptions::new().msi_ui, MsiUi::Passive);
+        assert_eq!(
+            InstallOptions::new().msi_ui(MsiUi::Basic).msi_ui,
+            MsiUi::Basic
+        );
+        assert_eq!(MsiUi::Passive.flag(), "/passive");
+        assert_eq!(MsiUi::Basic.flag(), "/qb");
+        assert_eq!(MsiUi::Quiet.flag(), "/quiet");
     }
 }
