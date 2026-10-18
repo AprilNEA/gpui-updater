@@ -87,6 +87,7 @@ mod status;
 pub mod delta;
 pub mod driver;
 pub mod install;
+pub mod manifest;
 pub mod source;
 pub mod verify;
 
