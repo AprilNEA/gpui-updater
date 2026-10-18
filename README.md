@@ -82,6 +82,11 @@ Sparkle driver. **0.3.0** adds delta updates (optional `delta` feature),
 version-bound signatures, key rotation, signed manifests, and macOS bundle
 checks, and requires HTTPS with bounded downloads into a private directory,
 with a few breaking changes (see [Migrating from 0.2](#migrating-from-02)).
+**0.4.0** classifies errors by `ErrorKind`, makes downloads cancellable and
+resumable, adds proxies and request headers, `FallbackSource`, install
+location checks, Authenticode checks on Windows, Linux app directories and
+AppImages, and package-manager detection, with a few breaking changes (see
+[Migrating from 0.3](#migrating-from-03)).
 Pick the adapter matching your application's GPUI package:
 
 | Package | Backend | Rust requirement |
@@ -93,23 +98,23 @@ Pick the adapter matching your application's GPUI package:
 
 Adapter requirements are conservative tested support floors, not a claim that
 older compilers necessarily fail. They do not raise the core's requirement.
-Registry dependencies for the 0.3 releases:
+Registry dependencies for the 0.4 releases:
 
 ```toml
 [dependencies]
 # Core only (blocking engine, no GPUI):
-gpui-updater-core = "0.3"
+gpui-updater-core = "0.4"
 
 # OR official GPUI (Entity<Updater>):
 gpui = "0.2.2"
-gpui-updater = "0.3"
+gpui-updater = "0.4"
 
 # OR gpui-pre (keep existing gpui_updater imports via an alias):
 gpui = { package = "gpui-pre", version = "0.3.4" }
-gpui-updater = { package = "gpui-updater-pre", version = "0.3" }
+gpui-updater = { package = "gpui-updater-pre", version = "0.4" }
 
 # Optional, next to either adapter: hand the macOS flow to Sparkle 2.
-gpui-updater-sparkle = "0.3"
+gpui-updater-sparkle = "0.4"
 ```
 
 The core and the two adapters are alternatives, not dependencies to combine;
@@ -552,7 +557,7 @@ changes in your app: `download` tries deltas from the running version first
 and otherwise behaves exactly as before.
 
 ```toml
-gpui-updater = { version = "0.3", features = ["delta"] }
+gpui-updater = { version = "0.4", features = ["delta"] }
 ```
 
 A delta in the `files-bsdiff-v1` format rebuilds the new install tree (the
@@ -940,11 +945,11 @@ are compiled. Pass package names to check only those, for example
 `cargo xtask check-packages gpui-updater-core gpui-updater-pre` on a Mac
 without the Metal toolchain.
 
-Release order: publish `gpui-updater-core` 0.3.0 first; after it is available in
+Release order: publish `gpui-updater-core` 0.4.0 first; after it is available in
 the registry, publish `gpui-updater`, `gpui-updater-pre` and
-`gpui-updater-sparkle` 0.3.0. Run normal package verification again before
+`gpui-updater-sparkle` 0.4.0. Run normal package verification again before
 publishing. A repository tag is not needed for registry resolution; if a
-coordinated release tag is created, `v0.3.0` should identify the published
+coordinated release tag is created, `v0.4.0` should identify the published
 workspace commit. Never rewrite an existing release tag or embed a consumer's
 GPUI Git pin here.
 
