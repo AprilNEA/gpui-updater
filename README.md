@@ -97,6 +97,31 @@ Only the adapters export `Updater`. Without the alias, pre imports use
 `gpui_updater_pre`. Before a release is published, use the corresponding
 `crates/<package>` path from this checkout.
 
+### Migrating from 0.3
+
+Breaking changes:
+
+- `UpdateStatus::Errored(String)` → `Errored(UpdateError)`. Show the error
+  with its `Display` (or `message()`), and branch on `kind()`, an
+  `ErrorKind`. See [GPUI entity](#gpui-entity) for what each kind means.
+- `DriverEvent::Failed(String)` → `Failed(UpdateError)`. A custom driver
+  builds one with `UpdateError::new(ErrorKind::Install, message)`.
+- `UpdateStatus` is now `#[non_exhaustive]`: add a wildcard arm to matches.
+
+New, with no change needed: `Updater::cancel`, `CancelToken` with
+`UpdateEngine::download_cancellable`, `UpdateDriver::cancel` (defaults to
+doing nothing), `Release::published_at` / `release_url`, `HttpOptions`,
+and `FallbackSource`.
+
+Behavior changes:
+
+- Dropping the `Updater` now cancels a running download; before, the
+  download ran on to the end.
+- A download that fails mid-body continues with a `Range` request when the
+  server allows it, instead of starting over.
+- With `EngineConfig::download_dir`, an earlier download that still verifies
+  is reused instead of downloaded again.
+
 ### Migrating from 0.2
 
 - `EngineConfig::minisign_public_key` (the field) became
@@ -186,6 +211,13 @@ release service:
 | `GitHubSource` | Existing GitHub Releases pipelines | Calls the GitHub Releases API, selects a matching asset, and can read `SHA256SUMS` / `.minisig` assets. |
 | `StaticManifestSource` | Cloudflare R2, S3, MinIO, B2, CDNs, static hosting | Fetches a static `latest.json`, selects an asset from `assets[]`, then downloads the asset URL directly. |
 | `AppcastSource` | Apps that publish (or want to publish) a Sparkle appcast | Fetches an appcast, picks the newest applicable `<item>` and the enclosure for this platform, and carries its `sparkle:edSignature`. |
+| `FallbackSource` | A mirror or second host for when the primary is down | Asks its sources in order and returns the release from the first one that answers. When all fail, returns the primary's error. |
+
+`FallbackSource::new(primary).or(mirror)` does not compare its sources: a
+primary that answers wins, even if the mirror knows a newer release. Each
+source verifies what it fetches with its own settings, such as a manifest's
+signing keys, and the engine verifies the artifact the same way whichever
+source named it.
 
 ### Proxies and request headers
 
