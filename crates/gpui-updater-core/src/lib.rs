@@ -90,5 +90,7 @@ pub use release::{
 /// Re-exported so consumers can build an [`EngineConfig`] without depending on
 /// `semver` directly (e.g. `Version::parse(env!("CARGO_PKG_VERSION"))`).
 pub use semver::Version;
-pub use source::{AppcastSource, AppcastVersion, GitHubSource, StaticManifestSource, UpdateSource};
+pub use source::{
+    AppcastSource, AppcastVersion, FallbackSource, GitHubSource, StaticManifestSource, UpdateSource,
+};
 pub use status::{UpdateError, UpdateStatus};

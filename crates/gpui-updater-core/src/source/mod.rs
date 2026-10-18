@@ -2,16 +2,19 @@
 //!
 //! A [`UpdateSource`] knows how to fetch the latest release metadata. The
 //! crate ships [`GitHubSource`], [`StaticManifestSource`], and
-//! [`AppcastSource`] (Sparkle / WinSparkle appcasts); implement the trait
-//! yourself to read from a self-hosted endpoint, GitLab, etc.
+//! [`AppcastSource`] (Sparkle / WinSparkle appcasts), plus
+//! [`FallbackSource`], which asks several of them in order; implement the
+//! trait yourself to read from a self-hosted endpoint, GitLab, etc.
 
 mod appcast;
 mod dates;
+mod fallback;
 mod github;
 mod manifest;
 mod trust;
 
 pub use appcast::{AppcastSource, AppcastVersion};
+pub use fallback::FallbackSource;
 pub use github::GitHubSource;
 pub use manifest::StaticManifestSource;
 
