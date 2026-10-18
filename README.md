@@ -330,6 +330,16 @@ can access, under a file name reduced to its last path component, and
 so nothing reaches the installer without passing the checks below. HTTPS
 protects the transfer; whether the file is trusted is decided by those checks.
 
+**Retries and resuming.** A download that fails with a transient network
+error (a dropped connection, a timeout, a 5xx status) is retried with
+backoff. When the server named the body with a strong `ETag` or a
+`Last-Modified` date, the retry asks for the rest only, with `Range` and
+`If-Range`. The file continues only if the server answers `206` for exactly
+that range; any other answer starts the file over. Up to five attempts in a
+row may fail without moving the download forward. Resuming works within one
+`download` call; a new call starts over. The checks below always run on the
+whole file.
+
 Every downloaded file, the full artifact or a delta, goes through the same
 checks, in this order:
 

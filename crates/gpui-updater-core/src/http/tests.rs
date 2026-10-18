@@ -2,8 +2,8 @@
 
 use super::*;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Deterministic "update artifact" bytes, stable so a download can be
@@ -387,7 +387,13 @@ fn black_holed_response_headers_fail_fast_and_transient() {
         agent: &agent,
         pre_body: deadline,
     };
-    let result = download_once(transfer, &Fetch::new(&url), &dest, &mut |_, _| {});
+    let result = download_once(
+        transfer,
+        &Fetch::new(&url),
+        &dest,
+        &mut Partial::default(),
+        &mut |_, _| {},
+    );
     let elapsed = started.elapsed();
     match result {
         Err((_, transient)) => assert!(transient, "a black-holed response is transient"),
@@ -520,4 +526,180 @@ fn a_cancelled_token_stops_before_connecting() {
         |_, _| {},
     );
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+}
+
+/// How [`spawn_range_server`] answers a `Range` request.
+#[derive(Clone, Copy)]
+enum Resume {
+    /// With a `206` for the rest of the body.
+    Honour,
+    /// With a `200` and the whole body again.
+    Ignore,
+    /// With a `206` that starts one byte later than asked.
+    WrongStart,
+}
+
+/// Serve the artifact, cutting the first response off halfway. `validator`
+/// is a header line that names the body (such as `ETag: "v1"`), or empty.
+/// Returns the URL and every request received, lowercased.
+fn spawn_range_server(
+    validator: &'static str,
+    resume: Resume,
+) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/update.bin", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let log = requests.clone();
+    thread::spawn(move || {
+        let validator = if validator.is_empty() {
+            String::new()
+        } else {
+            format!("{validator}\r\n")
+        };
+        for (n, conn) in listener.incoming().enumerate() {
+            let Ok(mut stream) = conn else { continue };
+            let mut buf = [0u8; 4096];
+            let len = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..len]).to_ascii_lowercase();
+            log.lock().unwrap().push(request.clone());
+            let body = artifact();
+            let offset = request
+                .lines()
+                .find_map(|line| line.strip_prefix("range: bytes="))
+                .and_then(|range| range.trim().trim_end_matches('-').parse::<usize>().ok());
+            let partial = |stream: &mut TcpStream, from: usize| {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {from}-{}/{}\r\nContent-Length: {}\r\n{validator}\r\n",
+                    body.len() - 1,
+                    body.len(),
+                    body.len() - from
+                );
+                let _ = stream.write_all(&body[from..]);
+            };
+            let whole = |stream: &mut TcpStream, cut: bool| {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{validator}\r\n",
+                    body.len()
+                );
+                let end = if cut { body.len() / 2 } else { body.len() };
+                let _ = stream.write_all(&body[..end]);
+            };
+            match (n, offset, resume) {
+                (0, _, _) => whole(&mut stream, true),
+                (_, Some(from), Resume::Honour) => partial(&mut stream, from),
+                (_, Some(from), Resume::WrongStart) => partial(&mut stream, from + 1),
+                _ => whole(&mut stream, false),
+            }
+        }
+    });
+    (url, requests)
+}
+
+/// Download from a [`spawn_range_server`], checking the file and, when the
+/// server honours the range, that progress never goes backwards. Returns the requests the server saw.
+fn resumed_download(validator: &'static str, resume: Resume, tag: &str) -> Vec<String> {
+    let (url, requests) = spawn_range_server(validator, resume);
+    let dest = temp_dest(tag);
+    let len = artifact().len() as u64;
+    let mut seen = Vec::new();
+    let result = download(&Fetch::new(&url).expect_len(len), &dest, |got, _| {
+        seen.push(got);
+    });
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(std::fs::read(&dest).unwrap(), artifact());
+    let _ = std::fs::remove_file(&dest);
+    let requests = requests.lock().unwrap().clone();
+    // Only a server that honours the range lets the file continue.
+    if matches!(resume, Resume::Honour)
+        && requests.iter().skip(1).any(|r| r.contains("range: bytes="))
+    {
+        let first = seen.iter().position(|&got| got > 0).unwrap();
+        assert!(
+            seen[first..].windows(2).all(|w| w[0] <= w[1]),
+            "progress went backwards: {seen:?}"
+        );
+    }
+    requests
+}
+
+#[test]
+fn resumes_a_dropped_download_with_its_etag() {
+    let requests = resumed_download("ETag: \"v1\"", Resume::Honour, "resume-etag");
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(!requests[0].contains("range:"), "{}", requests[0]);
+    assert!(
+        requests[1].contains("range: bytes=102400-"),
+        "{}",
+        requests[1]
+    );
+    assert!(requests[1].contains("if-range: \"v1\""), "{}", requests[1]);
+}
+
+#[test]
+fn resumes_with_last_modified_when_there_is_no_etag() {
+    let requests = resumed_download(
+        "Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT",
+        Resume::Honour,
+        "resume-date",
+    );
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(
+        requests[1].contains("if-range: wed, 21 oct 2015 07:28:00 gmt"),
+        "{}",
+        requests[1]
+    );
+}
+
+#[test]
+fn starts_over_without_a_strong_validator() {
+    for (validator, tag) in [("", "resume-none"), ("ETag: W/\"v1\"", "resume-weak")] {
+        let requests = resumed_download(validator, Resume::Honour, tag);
+        assert_eq!(requests.len(), 2, "{validator}: {requests:?}");
+        assert!(
+            !requests[1].contains("range:"),
+            "{validator}: {}",
+            requests[1]
+        );
+    }
+}
+
+#[test]
+fn starts_over_when_the_server_ignores_the_range() {
+    let requests = resumed_download("ETag: \"v1\"", Resume::Ignore, "resume-ignored");
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(
+        requests[1].contains("range: bytes=102400-"),
+        "{}",
+        requests[1]
+    );
+}
+
+#[test]
+fn starts_over_after_a_206_for_another_range() {
+    let requests = resumed_download("ETag: \"v1\"", Resume::WrongStart, "resume-wrong");
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert!(
+        requests[1].contains("range: bytes=102400-"),
+        "{}",
+        requests[1]
+    );
+    assert!(!requests[2].contains("range:"), "{}", requests[2]);
+}
+
+#[test]
+fn parses_content_range() {
+    assert_eq!(content_range("bytes 100-199/200"), Some((100, Some(200))));
+    assert_eq!(content_range(" bytes 0-0/* "), Some((0, None)));
+    for bad in [
+        "bytes 100-99/200",
+        "bytes 100-200/200",
+        "bytes */200",
+        "items 0-1/2",
+        "bytes 1-2",
+        "bytes x-2/3",
+    ] {
+        assert_eq!(content_range(bad), None, "{bad}");
+    }
 }

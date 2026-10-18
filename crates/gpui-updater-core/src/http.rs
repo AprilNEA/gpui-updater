@@ -14,8 +14,8 @@
 
 mod policy;
 
-use std::fs::File;
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -323,10 +323,14 @@ struct Transfer<'a> {
 /// size.
 ///
 /// Redirects (e.g. a GitHub release asset to its storage backend) are followed
-/// by `ureq` automatically, but never to plain HTTP. A transient transport
-/// failure — at connect or mid-stream — restarts the download from byte zero
-/// (the partial file is truncated and `progress` resets), up to
-/// [`MAX_RETRIES`] times. A cancelled download fails with
+/// by `ureq` automatically, but never to plain HTTP. After a transient
+/// transport failure — at connect or mid-stream — the download is retried.
+/// When the response named its body with a strong `ETag` or a
+/// `Last-Modified` date, the retry asks for the rest only (`Range` with
+/// `If-Range`) and continues the file if the server answers `206` for exactly
+/// that range. Otherwise it starts over from byte zero: the file is truncated
+/// and `progress` resets. Up to [`MAX_RETRIES`] attempts in a row may fail
+/// without moving the download forward. A cancelled download fails with
 /// [`Error::Cancelled`] and removes the partial file.
 pub(crate) fn download(
     fetch: &Fetch<'_>,
@@ -363,22 +367,58 @@ fn download_with(
     result
 }
 
+/// What the attempts so far have left in the file, so the next attempt can
+/// ask for the rest only.
+#[derive(Debug, Default)]
+struct Partial {
+    /// Bytes of the body already in the file.
+    len: u64,
+    /// The strong `ETag`, or else the `Last-Modified` date, of the response
+    /// those bytes came from. A `Range` request is only safe with an
+    /// `If-Range` that names the body, so without one the next attempt
+    /// starts over.
+    validator: Option<String>,
+    /// The size of the whole body, when known.
+    total: Option<u64>,
+}
+
+impl Partial {
+    /// The offset and validator for a `Range` request that continues this
+    /// download, if there is one.
+    fn resume_point(&self) -> Option<(u64, &str)> {
+        let validator = self.validator.as_deref()?;
+        (self.len > 0).then_some((self.len, validator))
+    }
+}
+
 fn retry_download(
     transfer: Transfer<'_>,
     fetch: &Fetch<'_>,
     dest: &Path,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
+    let mut partial = Partial::default();
     let mut tries: u32 = 0;
     loop {
         fetch.check_cancelled()?;
-        match download_once(transfer, fetch, dest, progress) {
+        let before = partial.len;
+        match download_once(transfer, fetch, dest, &mut partial, progress) {
             Ok(()) => return Ok(()),
             Err((Error::Cancelled, _)) => return Err(Error::Cancelled),
             Err((_, transient)) if transient && tries < MAX_RETRIES => {
+                if partial.resume_point().is_some() {
+                    // An attempt that moved the download forward does not use
+                    // up a retry.
+                    if partial.len > before {
+                        tries = 0;
+                    }
+                    progress(partial.len, partial.total);
+                } else {
+                    partial = Partial::default();
+                    progress(0, None);
+                }
                 fetch.pause(backoff(tries))?;
                 tries += 1;
-                progress(0, None);
             }
             Err((e, _)) => return Err(e),
         }
@@ -393,8 +433,11 @@ fn call_with_deadline(
     transfer: Transfer<'_>,
     fetch: &Fetch<'_>,
     transport: Transport,
+    resume: Option<(u64, &str)>,
 ) -> std::result::Result<ureq::http::Response<ureq::Body>, (Error, bool)> {
     let (url, deadline) = (fetch.url, transfer.pre_body);
+    let range =
+        resume.map(|(offset, validator)| (format!("bytes={offset}-"), validator.to_string()));
     let (tx, rx) = mpsc::channel();
     let agent = transfer.agent.clone();
     let owned_url = url.to_string();
@@ -408,6 +451,11 @@ fn call_with_deadline(
     thread::spawn(move || {
         let mut req =
             build(&agent, &owned_url, &[], transport).header("accept", "application/octet-stream");
+        if let Some((range, validator)) = &range {
+            req = req
+                .header("range", range.as_str())
+                .header("if-range", validator.as_str());
+        }
         for (k, v) in &owned_headers {
             req = req.header(k.as_str(), v.as_str());
         }
@@ -445,28 +493,27 @@ fn call_with_deadline(
 
 /// One download attempt. The bool in the error is whether it is worth retrying:
 /// a connect/status/mid-stream transport failure is, a local write failure
-/// (disk full, permissions) or a size mismatch is not.
+/// (disk full, permissions) or a size mismatch is not. `partial` records how
+/// far the file got, for the next attempt.
 fn download_once(
     transfer: Transfer<'_>,
     fetch: &Fetch<'_>,
     dest: &Path,
+    partial: &mut Partial,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> std::result::Result<(), (Error, bool)> {
     let url = fetch.url;
     let transport = Transport::of(url).map_err(|e| (e, false))?;
-    let mut resp = call_with_deadline(transfer, fetch, transport)?;
-    let status = resp.status();
-    if !status.is_success() {
-        let code = status.as_u16();
-        let transient = code >= 500 || matches!(code, 408 | 429);
-        return Err((Error::Http(format!("GET {url} -> {code}")), transient));
-    }
+    let mut resp = call_with_deadline(transfer, fetch, transport, partial.resume_point())?;
+    let start = body_start(&resp, url, partial)?;
 
+    // For a `206`, `Content-Length` counts the rest of the body only.
     let announced = resp
         .headers()
         .get("content-length")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|rest| start + rest);
     if let (Some(expected), Some(announced)) = (fetch.expected_len, announced) {
         if announced != expected {
             return Err((
@@ -494,10 +541,19 @@ fn download_once(
         "allowed"
     };
 
-    let mut file = File::create(dest).map_err(|e| (Error::Io(e), false))?;
+    match validator_of(resp.headers()) {
+        Some(validator) => partial.validator = Some(validator),
+        // A `206` need not repeat the validator it was asked with.
+        None if start == 0 => partial.validator = None,
+        None => {}
+    }
+    partial.len = start;
+    partial.total = total;
+
+    let mut file = open_at(dest, start).map_err(|e| (Error::Io(e), false))?;
     let mut reader = resp.body_mut().as_reader();
     let mut buf = vec![0u8; 64 * 1024];
-    let mut downloaded = 0u64;
+    let mut downloaded = start;
     loop {
         if fetch.check_cancelled().is_err() {
             return Err((Error::Cancelled, false));
@@ -515,6 +571,7 @@ fn download_once(
         }
         file.write_all(&buf[..n])
             .map_err(|e| (Error::Io(e), false))?;
+        partial.len = downloaded;
         progress(downloaded, total);
     }
     if downloaded < limit && fetch.expected_len.is_some() {
@@ -527,6 +584,105 @@ fn download_once(
     }
     file.flush().map_err(|e| (Error::Io(e), false))?;
     Ok(())
+}
+
+/// Where the body of `resp` starts in the file: `partial.len` for a `206`
+/// that continues the download, `0` for any other success. Fails for an
+/// error status, and for a `206` that does not continue the file, after
+/// which the next attempt starts over.
+fn body_start(
+    resp: &ureq::http::Response<ureq::Body>,
+    url: &str,
+    partial: &mut Partial,
+) -> std::result::Result<u64, (Error, bool)> {
+    let code = resp.status().as_u16();
+    let asked = partial.resume_point().map(|(offset, _)| offset);
+    match (code, asked) {
+        (206, Some(offset)) => {
+            let range = resp
+                .headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(content_range);
+            match range {
+                Some((first, size))
+                    if first == offset
+                        && size.is_none_or(|size| partial.total.is_none_or(|t| t == size)) =>
+                {
+                    Ok(offset)
+                }
+                _ => {
+                    *partial = Partial::default();
+                    Err((
+                        Error::Http(format!("GET {url} -> 206 for another range")),
+                        true,
+                    ))
+                }
+            }
+        }
+        (206, None) => Err((
+            Error::Http(format!("GET {url} -> 206 without a range request")),
+            false,
+        )),
+        // The file changed size or the server forgot it: start over.
+        (416, Some(_)) => {
+            *partial = Partial::default();
+            Err((Error::Http(format!("GET {url} -> 416")), true))
+        }
+        (200..=299, _) => Ok(0),
+        (code, _) => {
+            let transient = code >= 500 || matches!(code, 408 | 429);
+            Err((Error::Http(format!("GET {url} -> {code}")), transient))
+        }
+    }
+}
+
+/// The first byte and the size of the whole body in a
+/// `Content-Range: bytes <first>-<last>/<size>` value, where `<size>` may be
+/// `*` (unknown).
+fn content_range(value: &str) -> Option<(u64, Option<u64>)> {
+    let rest = value.trim().strip_prefix("bytes ")?;
+    let (span, size) = rest.split_once('/')?;
+    let (first, last) = span.split_once('-')?;
+    let first: u64 = first.trim().parse().ok()?;
+    let last: u64 = last.trim().parse().ok()?;
+    let size = match size.trim() {
+        "*" => None,
+        size => Some(size.parse::<u64>().ok()?),
+    };
+    if last < first || size.is_some_and(|size| last >= size) {
+        return None;
+    }
+    Some((first, size))
+}
+
+/// The value that names this exact body for `If-Range`: a strong `ETag`, or
+/// else the `Last-Modified` date. A weak `ETag` (`W/"…"`) may not be used
+/// with `If-Range`.
+fn validator_of(headers: &ureq::http::HeaderMap) -> Option<String> {
+    let get = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    get("etag")
+        .filter(|tag| !tag.starts_with("W/"))
+        .or_else(|| get("last-modified"))
+        .map(str::to_string)
+}
+
+/// Open `dest` for writing at byte `start`. At `0` the file is truncated;
+/// otherwise it is cut to `start`, dropping any bytes past it.
+fn open_at(dest: &Path, start: u64) -> io::Result<File> {
+    if start == 0 {
+        return File::create(dest);
+    }
+    let mut file = OpenOptions::new().write(true).open(dest)?;
+    file.set_len(start)?;
+    file.seek(SeekFrom::Start(start))?;
+    Ok(file)
 }
 
 #[cfg(test)]
