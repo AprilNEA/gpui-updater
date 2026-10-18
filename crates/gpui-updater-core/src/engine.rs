@@ -99,9 +99,11 @@ impl<S: UpdateSource> UpdateEngine<S> {
     /// [`download_cancellable`](Self::download_cancellable).
     ///
     /// # Errors
-    /// Returns an error on download failure, if verification fails, or if the
+    /// Returns an error on download failure, if verification fails, if the
     /// policy requires a check the release cannot satisfy
-    /// ([`Error::VerificationRequired`](crate::Error::VerificationRequired)).
+    /// ([`Error::VerificationRequired`](crate::Error::VerificationRequired)),
+    /// or, before anything is downloaded, if the update could not be
+    /// installed where the app is ([`check_location`](Self::check_location)).
     pub fn download(
         &self,
         release: &Release,
@@ -126,6 +128,7 @@ impl<S: UpdateSource> UpdateEngine<S> {
         mut progress: impl FnMut(u64, Option<u64>),
     ) -> Result<Artifact> {
         cancel.check()?;
+        self.check_location(release)?;
         let dir = self.download_dir()?;
         // The name comes from release metadata; keep the file inside `dir`.
         let artifact = dir.join(staging::safe_file_name(&release.asset.name, "update"));
@@ -213,6 +216,20 @@ impl<S: UpdateSource> UpdateEngine<S> {
             }
             None => Ok(staging::private_temp_dir("gpui-updater")?),
         }
+    }
+
+    /// Check that `release` could be installed where the app is, without
+    /// downloading anything: see [`install::check_location`].
+    /// [`download`](Self::download) runs this first; call it yourself to tell
+    /// the user before offering the download.
+    ///
+    /// # Errors
+    /// [`Error::Location`](crate::Error::Location) when the app runs from a
+    /// read-only place, such as a disk image or an App Translocation copy, and
+    /// [`Error::Permission`](crate::Error::Permission) when the user may not
+    /// write next to it.
+    pub fn check_location(&self, release: &Release) -> Result<()> {
+        install::check_location(&self.install_root()?, &release.asset.name)
     }
 
     fn install_root(&self) -> Result<PathBuf> {

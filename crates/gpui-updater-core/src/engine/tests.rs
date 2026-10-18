@@ -521,3 +521,35 @@ fn does_not_reuse_a_file_nothing_can_check() {
     }
     assert_eq!(requests.load(Ordering::SeqCst), 4);
 }
+
+#[cfg(unix)]
+#[test]
+fn an_install_location_the_user_may_not_write_fails_before_downloading() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let (url, requests) = serve_counting(b"artifact");
+    let engine = UpdateEngine::new(
+        PanicSource,
+        config(Verification::Off, None)
+            .download_dir(dir.path().join("downloads"))
+            .install_root(locked.join("App.app")),
+    );
+    let mut wanted = release(None, None, None);
+    wanted.asset = Asset::new("app.dmg", url.as_str(), 0);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // A privileged user may write anyway, so the check passes there.
+    let privileged = std::fs::write(locked.join("probe"), b"").is_ok();
+    let checked = engine.check_location(&wanted);
+    let downloaded = engine.download(&wanted, |_, _| {});
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if privileged {
+        return;
+    }
+    assert!(matches!(checked, Err(Error::Permission(_))), "{checked:?}");
+    assert!(matches!(downloaded, Err(Error::Permission(_))));
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert!(!dir.path().join("downloads").exists());
+}

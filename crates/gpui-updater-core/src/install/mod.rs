@@ -91,3 +91,129 @@ pub fn current_install_root() -> Result<PathBuf> {
         Ok(exe)
     }
 }
+
+/// Check, before anything is downloaded, that an update can be installed over
+/// `install_root`. `artifact_name` is the release asset's file name, which
+/// decides how it installs.
+///
+/// Installing replaces `install_root` from inside its parent directory, so
+/// that directory must be writable — except for a Windows `.msi`, which
+/// msiexec installs with its own elevation. On macOS an app that runs from
+/// an App Translocation path is rejected too: macOS runs a quarantined app
+/// from a randomized read-only copy until the user moves it.
+///
+/// # Errors
+/// [`Error::Location`](crate::Error::Location) for an App Translocation path
+/// or a read-only volume (such as a mounted disk image), and
+/// [`Error::Permission`](crate::Error::Permission) when the user may not
+/// write to the parent directory. Any other failure to probe the directory
+/// is left for the install to report.
+pub fn check_location(install_root: &Path, artifact_name: &str) -> Result<()> {
+    if cfg!(target_os = "macos")
+        && install_root
+            .components()
+            .any(|c| c.as_os_str() == "AppTranslocation")
+    {
+        return Err(crate::Error::Location(
+            "the app runs from a read-only App Translocation copy; move it to /Applications and open it again"
+                .into(),
+        ));
+    }
+    let installer_elevates =
+        cfg!(target_os = "windows") && artifact_name.to_ascii_lowercase().ends_with(".msi");
+    if installer_elevates {
+        return Ok(());
+    }
+    match install_root.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => probe_write(dir),
+        _ => Ok(()),
+    }
+}
+
+/// Create and remove a file in `dir` to learn whether the user may write
+/// there.
+fn probe_write(dir: &Path) -> Result<()> {
+    use std::io::ErrorKind;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let probe = dir.join(format!(
+        ".gpui-updater-probe-{}-{nanos}",
+        std::process::id()
+    ));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) if e.kind() == ErrorKind::ReadOnlyFilesystem => {
+            Err(crate::Error::Location(format!(
+                "{} is on a read-only volume, such as a mounted disk image; move the app to a writable folder",
+                dir.display()
+            )))
+        }
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(crate::Error::Permission(
+            format!("no permission to write to {}", dir.display()),
+        )),
+        Err(e) => {
+            tracing::debug!(dir = %dir.display(), error = %e, "could not probe the install directory");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+    use crate::error::{Error, ErrorKind};
+
+    #[test]
+    fn accepts_a_writable_folder_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        check_location(&dir.path().join("App.app"), "App.dmg").unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn leaves_a_missing_folder_for_the_install_to_report() {
+        let dir = tempfile::tempdir().unwrap();
+        check_location(&dir.path().join("gone/App.app"), "App.dmg").unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejects_app_translocation() {
+        let root = Path::new("/private/var/folders/x/T/AppTranslocation/1A2B/d/App.app");
+        let err = check_location(root, "App.dmg").unwrap_err();
+        assert!(matches!(err, Error::Location(_)), "{err:?}");
+        assert_eq!(err.kind(), ErrorKind::Location);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_folder_the_user_may_not_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // A privileged user may write anyway, so the check passes there.
+        let privileged = std::fs::write(locked.join("probe"), b"").is_ok();
+        let result = check_location(&locked.join("App.app"), "App.dmg");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            return;
+        }
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::Permission(_)), "{err:?}");
+        assert_eq!(err.kind(), ErrorKind::Permission);
+    }
+}

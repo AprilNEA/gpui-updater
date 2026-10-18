@@ -111,7 +111,7 @@ Breaking changes:
 New, with no change needed: `Updater::cancel`, `CancelToken` with
 `UpdateEngine::download_cancellable`, `UpdateDriver::cancel` (defaults to
 doing nothing), `Release::published_at` / `release_url`, `HttpOptions`,
-and `FallbackSource`.
+`FallbackSource`, and `UpdateEngine::check_location` / `install::check_location`.
 
 Behavior changes:
 
@@ -121,6 +121,9 @@ Behavior changes:
   server allows it, instead of starting over.
 - With `EngineConfig::download_dir`, an earlier download that still verifies
   is reused instead of downloaded again.
+- `download` fails with `Location` or `Permission` before downloading when
+  the update could not be installed where the app is. Before, the download
+  finished and the install failed.
 
 ### Migrating from 0.2
 
@@ -715,6 +718,14 @@ Downloading { downloaded, total } → Installing → Staged(v) | Errored(error)`
 | `Other` | Anything else | Show the message |
 
 The engine's `Error::kind()` returns the same classification.
+
+`Location` and `Permission` come before anything is downloaded.
+`UpdateEngine::download` first calls `UpdateEngine::check_location`, which
+rejects an App Translocation path on macOS. It then creates and removes a
+probe file next to the install root: installing replaces the app from inside
+that folder. A Windows `.msi` skips the probe, because msiexec elevates
+itself. Call `check_location` yourself to tell the user before offering the
+download; `install::check_location` does the same for any path.
 
 `cancel` stops a download. The status returns to `Available(v)`, not
 `Errored`, and the partial file is removed. The download stops at its next
