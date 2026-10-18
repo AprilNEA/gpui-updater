@@ -83,7 +83,10 @@ pub use engine::{
 };
 pub use error::{Error, ErrorKind, Result};
 pub use http::HttpOptions;
-pub use install::{InstallOptions, Installed, MsiUi, current_install_root};
+pub use install::{
+    InstallOptions, Installed, MsiUi, Ownership, OwnershipHints, PackageManager,
+    current_install_root,
+};
 pub use release::{
     Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, parse_version_lenient,
 };

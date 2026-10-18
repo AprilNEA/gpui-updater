@@ -24,7 +24,7 @@ pub use config::{
 use crate::cancel::CancelToken;
 use crate::error::Result;
 use crate::http::{self, Fetch};
-use crate::install::{self, Installed};
+use crate::install::{self, Installed, Ownership, OwnershipHints};
 use crate::release::Release;
 use crate::source::UpdateSource;
 use crate::staging;
@@ -262,6 +262,18 @@ impl<S: UpdateSource> UpdateEngine<S> {
         if let Ok(root) = self.install_root() {
             install::remove_leftovers(&root);
         }
+    }
+
+    /// Who keeps the installed app up to date: the app itself, a package
+    /// manager, or the packager. See [`install::ownership`]. When it is not
+    /// [`Ownership::SelfUpdate`], tell the user how to update instead of
+    /// offering to. When the install root is unknown, the app is taken to
+    /// update itself.
+    #[must_use]
+    pub fn ownership(&self, hints: &OwnershipHints) -> Ownership {
+        self.install_root().map_or(Ownership::SelfUpdate, |root| {
+            install::ownership(&root, hints)
+        })
     }
 
     /// Run the full pipeline. Returns `Ok(None)` when already up to date.

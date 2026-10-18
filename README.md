@@ -120,8 +120,10 @@ New, with no change needed: `Updater::cancel`, `CancelToken` with
 doing nothing), `Release::published_at` / `release_url`, `HttpOptions`,
 `FallbackSource`, `UpdateEngine::check_location` / `install::check_location`,
 `CodeSigning::Publisher`, `InstallOptions` / `MsiUi` with
-`EngineConfig::install_options` and `install::install_with`, and
-`UpdateEngine::remove_leftovers` / `install::remove_leftovers`.
+`EngineConfig::install_options` and `install::install_with`,
+`UpdateEngine::remove_leftovers` / `install::remove_leftovers`, and
+`install::ownership` / `UpdateEngine::ownership` with `Ownership`,
+`OwnershipHints`, and `PackageManager`.
 
 Behavior changes:
 
@@ -703,6 +705,50 @@ let engine = UpdateEngine::new(
   verifying Sparkle 2.10's signed-feed comment; the engine always downloads the
   full archive. On macOS the engine installs only `.dmg` enclosures (a `.zip`
   or `.tar.xz` fails with a clear error); Sparkle itself handles all formats.
+
+### Installs a package manager owns
+
+An app that Homebrew, apt, or Scoop installed should not replace itself. The
+package manager then reports a version it did not install, and its next
+upgrade can undo the update. Call `install::ownership` (or
+`UpdateEngine::ownership`) at startup. When it is not
+`Ownership::SelfUpdate`, show how to update instead of an update button.
+
+```rust
+use gpui_updater::{Ownership, OwnershipHints, current_install_root, install};
+
+// A distribution that builds the app sets MYAPP_UPDATE_EXPLANATION, as Zed's
+// packagers set ZED_UPDATE_EXPLANATION.
+let hints = OwnershipHints::new().explanation(option_env!("MYAPP_UPDATE_EXPLANATION"));
+let owner = current_install_root()
+    .map_or(Ownership::SelfUpdate, |root| install::ownership(&root, &hints));
+if !owner.is_self_update() {
+    // "installed by Homebrew (myapp)", and "brew upgrade myapp"
+    println!("{owner}: {}", owner.update_command().unwrap_or_default());
+}
+```
+
+The check does not block downloads; the app decides. It looks, in order, at:
+
+| Source | Recognized as |
+| --- | --- |
+| `OwnershipHints::explanation`, when not blank | `Ownership::Packager(text)` |
+| `/nix/store/…` | Nix |
+| `/snap/<name>/…` | Snap |
+| `/app/…` with `FLATPAK_ID`, or `…/flatpak/app/<id>/…` | Flatpak |
+| `<prefix>/Cellar/<formula>/…`, prefix from `HOMEBREW_PREFIX` or the defaults | Homebrew |
+| `…\scoop\apps\<app>\…`, or under `SCOOP` / `SCOOP_GLOBAL` | Scoop |
+| `<ChocolateyInstall>\lib\<package>\…` | Chocolatey |
+| `…\Microsoft\WinGet\Packages\<id>_<source>\…` | winget |
+| `C:\Program Files\WindowsApps\…` | Microsoft Store |
+| `Contents/_MASReceipt/receipt` in the bundle | Mac App Store |
+| A `Caskroom/<token>/<version>/<App>.app` symlink back to the app | Homebrew cask |
+| `dpkg-query --search`, then `rpm -qf`, then `pacman -Qo` (Linux) | apt, rpm, pacman |
+
+The Linux queries run with `LC_ALL=C` for at most two seconds each. A missing
+command, a timeout, or an unreadable folder does not claim the install, so
+the result is then `SelfUpdate`. Turn the queries off with
+`OwnershipHints::query_package_database(false)`.
 
 ### GPUI entity
 

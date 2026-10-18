@@ -21,6 +21,9 @@ pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+mod ownership;
+pub use ownership::{Ownership, OwnershipHints, PackageManager, ownership};
+
 /// Outcome of installing an update.
 #[derive(Debug, Clone)]
 pub struct Installed {
