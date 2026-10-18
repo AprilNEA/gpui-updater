@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use super::{UpdateSource, dates, trust};
 use crate::error::{Error, Result};
-use crate::http;
+use crate::http::{self, HttpOptions};
 use crate::release::{
     Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, web_page_url,
 };
@@ -75,6 +75,8 @@ pub struct StaticManifestSource {
     keys: Vec<String>,
     /// Where the manifest's signature lives; defaults to `<url>.minisig`.
     signature_url: Option<String>,
+    /// Extra headers and the proxy for the manifest and its signature.
+    http: HttpOptions,
 }
 
 impl StaticManifestSource {
@@ -89,7 +91,15 @@ impl StaticManifestSource {
             format: None,
             keys: Vec::new(),
             signature_url: None,
+            http: HttpOptions::new(),
         }
+    }
+
+    /// Fetch the manifest and its signature with `http`'s extra headers and proxy.
+    #[must_use]
+    pub fn http(mut self, http: HttpOptions) -> Self {
+        self.http = http;
+        self
     }
 
     /// Require the manifest to be signed by this base64 minisign public key.
@@ -215,13 +225,13 @@ impl StaticManifestSource {
     /// are configured.
     fn fetch_manifest(&self) -> Result<Manifest> {
         if self.keys.is_empty() {
-            return http::get_json(&self.url, &[]);
+            return http::get_json(&self.url, &[], &self.http);
         }
         let signature_url = self
             .signature_url
             .clone()
             .unwrap_or_else(|| format!("{}.minisig", self.url));
-        let body = trust::fetch_signed(&self.url, &signature_url, &self.keys)?;
+        let body = trust::fetch_signed(&self.url, &signature_url, &self.keys, &self.http)?;
         serde_json::from_str(&body).map_err(|e| Error::Parse(e.to_string()))
     }
 }

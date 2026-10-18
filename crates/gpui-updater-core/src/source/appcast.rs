@@ -14,7 +14,7 @@ use semver::Version;
 
 use super::{UpdateSource, dates};
 use crate::error::{Error, Result};
-use crate::http::{self, Metadata};
+use crate::http::{self, HttpOptions, Metadata};
 use crate::release::{Asset, Release, parse_version_lenient, web_page_url};
 
 use feed::{Enclosure, Item};
@@ -111,6 +111,8 @@ pub struct AppcastSource {
     channels: Vec<String>,
     version_field: AppcastVersion,
     system_version: Option<Version>,
+    /// Extra headers and the proxy for the appcast.
+    http: HttpOptions,
 }
 
 impl AppcastSource {
@@ -123,7 +125,15 @@ impl AppcastSource {
             channels: Vec::new(),
             version_field: AppcastVersion::default(),
             system_version: None,
+            http: HttpOptions::new(),
         }
+    }
+
+    /// Fetch the appcast with `http`'s extra headers and proxy.
+    #[must_use]
+    pub fn http(mut self, http: HttpOptions) -> Self {
+        self.http = http;
+        self
     }
 
     /// Accept only enclosures whose `sparkle:os` equals `os`
@@ -252,7 +262,7 @@ impl AppcastSource {
 
 impl UpdateSource for AppcastSource {
     fn fetch_latest(&self) -> Result<Release> {
-        let xml = http::get_string(&self.url, &[], Metadata::Document)?;
+        let xml = http::get_string(&self.url, &[], Metadata::Document, &self.http)?;
         let items = feed::parse(&xml)?;
         let needs_arch = items.iter().any(|i| !i.hardware_requirements.is_empty());
         let host = HostFacts {

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 
 use crate::error::{Error, Result};
-use crate::http::{self, Metadata};
+use crate::http::{self, HttpOptions, Metadata};
 use crate::release::{DeltaAsset, Release};
 use crate::verify;
 
@@ -160,6 +160,9 @@ pub struct EngineConfig {
     /// Longest chain of deltas to download when none starts at the installed
     /// version. Defaults to [`DEFAULT_MAX_DELTA_HOPS`].
     pub max_delta_hops: usize,
+    /// Extra headers and the proxy for artifacts, deltas, and their
+    /// checksum and signature files. Sources have their own.
+    pub http: HttpOptions,
 }
 
 impl EngineConfig {
@@ -178,6 +181,7 @@ impl EngineConfig {
             max_download_size: DEFAULT_MAX_DOWNLOAD_SIZE,
             deltas: true,
             max_delta_hops: DEFAULT_MAX_DELTA_HOPS,
+            http: HttpOptions::new(),
         }
     }
 
@@ -274,6 +278,15 @@ impl EngineConfig {
         self
     }
 
+    /// Download with `http`'s extra headers and proxy: the artifact, deltas,
+    /// and their checksum and signature files. Metadata requests use the
+    /// options set on the source.
+    #[must_use]
+    pub fn http(mut self, http: HttpOptions) -> Self {
+        self.http = http;
+        self
+    }
+
     /// Fail closed when the policy requires a check the release *metadata*
     /// cannot satisfy (no public key, no advertised signature, no checksum).
     ///
@@ -337,7 +350,7 @@ impl EngineConfig {
         self.precheck_integrity(file)?;
 
         let mut verified_checksum = false;
-        match resolve_checksum(file)? {
+        match resolve_checksum(file, &self.http)? {
             Some(expected) => {
                 verify::verify_sha256(path, &expected)?;
                 verified_checksum = true;
@@ -358,7 +371,7 @@ impl EngineConfig {
             verified_signature = true;
         }
         if !self.minisign_public_keys.is_empty() {
-            if let Some(signature) = resolve_minisign(file)? {
+            if let Some(signature) = resolve_minisign(file, &self.http)? {
                 let keys: Vec<&str> = self
                     .minisign_public_keys
                     .iter()
@@ -462,13 +475,13 @@ fn non_empty(s: Option<&str>) -> Option<&str> {
 
 /// The expected SHA-256 of a file: the inline value if present, otherwise
 /// looked up in the checksums file at `checksums_url`.
-fn resolve_checksum(file: Integrity<'_>) -> Result<Option<String>> {
+fn resolve_checksum(file: Integrity<'_>, http: &HttpOptions) -> Result<Option<String>> {
     if let Some(sha256) = non_empty(file.sha256) {
         return Ok(Some(sha256.to_string()));
     }
     match non_empty(file.checksums_url) {
         Some(url) => Ok(verify::sha256_from_sums(
-            &http::get_string(url, &[], Metadata::Sidecar)?,
+            &http::get_string(url, &[], Metadata::Sidecar, http)?,
             file.name,
         )),
         None => Ok(None),
@@ -478,12 +491,12 @@ fn resolve_checksum(file: Integrity<'_>) -> Result<Option<String>> {
 /// The minisign signature for a file: the inline value if present, otherwise
 /// fetched from `signature_url`. `None` when the release advertises neither,
 /// or when a fetched signature body is blank.
-fn resolve_minisign(file: Integrity<'_>) -> Result<Option<String>> {
+fn resolve_minisign(file: Integrity<'_>, http: &HttpOptions) -> Result<Option<String>> {
     if let Some(signature) = non_empty(file.signature) {
         return Ok(Some(signature.to_string()));
     }
     if let Some(url) = non_empty(file.signature_url) {
-        let body = http::get_string(url, &[], Metadata::Sidecar)?;
+        let body = http::get_string(url, &[], Metadata::Sidecar, http)?;
         return Ok(non_empty(Some(&body)).map(str::to_string));
     }
     Ok(None)

@@ -226,12 +226,12 @@ fn bounds_metadata_bodies() {
     let url = format!("http://{addr}/app.dmg.minisig");
     let started = Instant::now();
     assert!(matches!(
-        get_string(&url, &[], Metadata::Sidecar),
+        get_string(&url, &[], Metadata::Sidecar, &HttpOptions::new()),
         Err(Error::Http(_))
     ));
     assert!(started.elapsed() < Duration::from_secs(2), "must not retry");
     // A document may be larger than a sidecar.
-    let body = get_string(&url, &[], Metadata::Document).unwrap();
+    let body = get_string(&url, &[], Metadata::Document, &HttpOptions::new()).unwrap();
     assert_eq!(body.len() as u64, Metadata::Sidecar.max_len() + 1);
 }
 
@@ -274,7 +274,7 @@ fn refuses_plain_http_before_connecting() {
     // `.invalid` never resolves, so reaching DNS would fail differently.
     let url = "http://updates.example.invalid/latest.json";
     assert!(matches!(
-        get_string(url, &[], Metadata::Document),
+        get_string(url, &[], Metadata::Document, &HttpOptions::new()),
         Err(Error::InsecureUrl(_))
     ));
     let dest = temp_dest("insecure");
@@ -300,7 +300,7 @@ fn reports_redirects_to_plain_http_as_insecure() {
 fn plain_http_to_loopback_follows_no_redirects() {
     let addr = spawn_server(Fault::RedirectOffMachine, usize::MAX);
     let url = format!("http://{addr}/latest.json");
-    let err = get_string(&url, &[], Metadata::Document).unwrap_err();
+    let err = get_string(&url, &[], Metadata::Document, &HttpOptions::new()).unwrap_err();
     assert!(err.to_string().contains("302"), "{err}");
     let dest = temp_dest("loopback-redirect");
     let err = download(&Fetch::new(&url), &dest, |_, _| {}).unwrap_err();
@@ -361,7 +361,7 @@ fn slow_body_is_not_killed_while_progressing() {
     let url = format!("http://{addr}/update.bin");
     let dest = temp_dest("slow-body");
     let tight = Duration::from_millis(500);
-    let agent = download_agent(tight);
+    let agent = download_agent(tight, &HttpOptions::new()).unwrap();
     let transfer = Transfer {
         agent: &agent,
         pre_body: tight,
@@ -382,7 +382,7 @@ fn black_holed_response_headers_fail_fast_and_transient() {
     let dest = temp_dest("black-hole");
     let deadline = Duration::from_millis(300);
     let started = Instant::now();
-    let agent = download_agent(deadline);
+    let agent = download_agent(deadline, &HttpOptions::new()).unwrap();
     let transfer = Transfer {
         agent: &agent,
         pre_body: deadline,
@@ -410,7 +410,7 @@ fn recovers_from_midstream_stall() {
     let addr = spawn_server(Fault::StallMidBody, 1);
     let url = format!("http://{addr}/update.bin");
     let dest = temp_dest("stall");
-    let agent = download_agent(Duration::from_millis(300));
+    let agent = download_agent(Duration::from_millis(300), &HttpOptions::new()).unwrap();
     let transfer = Transfer {
         agent: &agent,
         pre_body: PRE_BODY_TIMEOUT,
@@ -425,7 +425,8 @@ fn recovers_from_midstream_stall() {
 fn metadata_fetch_retries_transient_failures() {
     let addr = spawn_server(Fault::Status503, 2);
     let url = format!("http://{addr}/SHA256SUMS");
-    let body = get_string(&url, &[], Metadata::Sidecar).expect("expected recovery");
+    let body =
+        get_string(&url, &[], Metadata::Sidecar, &HttpOptions::new()).expect("expected recovery");
     assert_eq!(body.into_bytes(), artifact());
 }
 
@@ -558,9 +559,7 @@ fn spawn_range_server(
         };
         for (n, conn) in listener.incoming().enumerate() {
             let Ok(mut stream) = conn else { continue };
-            let mut buf = [0u8; 4096];
-            let len = stream.read(&mut buf).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..len]).to_ascii_lowercase();
+            let request = read_head(&mut stream).to_ascii_lowercase();
             log.lock().unwrap().push(request.clone());
             let body = artifact();
             let offset = request
@@ -702,4 +701,112 @@ fn parses_content_range() {
     ] {
         assert_eq!(content_range(bad), None, "{bad}");
     }
+}
+
+/// Answer one request with `ok`, returning the request text.
+fn spawn_recorder() -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/feed", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_head(&mut stream).to_ascii_lowercase();
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        request
+    });
+    (url, handle)
+}
+
+#[test]
+fn sends_configured_headers_and_lets_the_source_win() {
+    let (url, request) = spawn_recorder();
+    let http = HttpOptions::new()
+        .header("X-Team", "desktop")
+        .header("Authorization", "Bearer mine");
+    let body = get_string(
+        &url,
+        &[("authorization", "Bearer source")],
+        Metadata::Document,
+        &http,
+    )
+    .unwrap();
+    assert_eq!(body, "ok");
+    let request = request.join().unwrap();
+    assert!(request.contains("x-team: desktop"), "{request}");
+    assert!(
+        request.contains("authorization: bearer source"),
+        "{request}"
+    );
+    assert!(!request.contains("bearer mine"), "{request}");
+}
+
+/// A proxy that serves the artifact for every request it receives, whether
+/// tunnelled with `CONNECT` or sent in absolute form. Returns its address and
+/// the first line of each request.
+fn spawn_proxy() -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let log = lines.clone();
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let request = read_head(&mut stream);
+            let first = request.lines().next().unwrap_or_default().to_string();
+            log.lock().unwrap().push(first.clone());
+            if first.starts_with("CONNECT ") {
+                let _ = stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+                read_head(&mut stream);
+            }
+            let body = artifact();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&body);
+        }
+    });
+    (addr, lines)
+}
+
+/// Read a request up to the blank line that ends its headers, however the
+/// client splits its writes.
+fn read_head(stream: &mut TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => head.extend_from_slice(&buf[..n]),
+        }
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+#[test]
+fn downloads_through_the_configured_proxy() {
+    let (proxy, lines) = spawn_proxy();
+    // Nothing listens on the discard port, so only the proxy can answer.
+    let url = "http://127.0.0.1:9/update.bin";
+    let dest = temp_dest("proxy");
+    let http = HttpOptions::new().proxy(format!("http://{proxy}"));
+    download(&Fetch::new(url).http(&http), &dest, |_, _| {}).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), artifact());
+    let _ = std::fs::remove_file(&dest);
+    let lines = lines.lock().unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    // ureq tunnels every proxied request with `CONNECT`.
+    assert!(lines[0].starts_with("CONNECT 127.0.0.1:9 "), "{lines:?}");
+}
+
+#[test]
+fn an_invalid_proxy_fails_the_request() {
+    let http = HttpOptions::new().proxy("ftp://proxy");
+    let err = get_string(
+        "https://example.invalid/feed",
+        &[],
+        Metadata::Document,
+        &http,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("invalid proxy URL"), "{err}");
 }

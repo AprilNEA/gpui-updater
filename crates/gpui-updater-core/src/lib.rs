@@ -82,6 +82,7 @@ pub use engine::{
     EngineConfig, UpdateEngine, Verification, VersionBinding,
 };
 pub use error::{Error, ErrorKind, Result};
+pub use http::HttpOptions;
 pub use install::{Installed, current_install_root};
 pub use release::{
     Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, parse_version_lenient,

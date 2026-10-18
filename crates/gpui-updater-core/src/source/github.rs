@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{UpdateSource, dates};
 use crate::error::{Error, Result};
-use crate::http::{self, Metadata};
+use crate::http::{self, HttpOptions, Metadata};
 use crate::release::{
     Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, web_page_url,
 };
@@ -48,6 +48,8 @@ pub struct GitHubSource {
     delta_history: usize,
     /// Optional token for private repos / higher rate limits.
     token: Option<String>,
+    /// Extra headers and the proxy for API and checksum requests.
+    http: HttpOptions,
 }
 
 impl GitHubSource {
@@ -63,7 +65,15 @@ impl GitHubSource {
             include_prereleases: false,
             delta_history: 0,
             token: None,
+            http: HttpOptions::new(),
         }
+    }
+
+    /// Fetch the release list and the checksums file with `http`'s extra headers and proxy.
+    #[must_use]
+    pub fn http(mut self, http: HttpOptions) -> Self {
+        self.http = http;
+        self
     }
 
     /// Require the selected asset's name to contain `substr` (case-insensitive).
@@ -132,14 +142,14 @@ impl GitHubSource {
     fn fetch_releases(&self, headers: &[(&str, &str)]) -> Result<Vec<GhRelease>> {
         if !self.include_prereleases && self.delta_history == 0 {
             let url = format!("{API}/repos/{}/{}/releases/latest", self.owner, self.repo);
-            return Ok(vec![http::get_json(&url, headers)?]);
+            return Ok(vec![http::get_json(&url, headers, &self.http)?]);
         }
         let per_page = (self.delta_history + 1).clamp(30, 100);
         let url = format!(
             "{API}/repos/{}/{}/releases?per_page={per_page}",
             self.owner, self.repo
         );
-        let list: Vec<GhRelease> = http::get_json(&url, headers)?;
+        let list: Vec<GhRelease> = http::get_json(&url, headers, &self.http)?;
         Ok(list
             .into_iter()
             .filter(|r| !r.draft && (self.include_prereleases || !r.prerelease))
@@ -175,6 +185,7 @@ impl UpdateSource for GitHubSource {
                 &sums.browser_download_url,
                 &headers,
                 Metadata::Sidecar,
+                &self.http,
             )?),
             None => None,
         };

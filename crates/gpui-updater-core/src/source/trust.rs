@@ -9,14 +9,19 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
-use crate::http::{self, Metadata};
+use crate::http::{self, HttpOptions, Metadata};
 use crate::verify;
 
 /// Fetch the text at `url` and verify it against the minisign signature at
 /// `signature_url`, made by any of `keys`. Returns the verified text.
-pub(super) fn fetch_signed(url: &str, signature_url: &str, keys: &[String]) -> Result<String> {
-    let body = http::get_string(url, &[], Metadata::Document)?;
-    let signature = http::get_string(signature_url, &[], Metadata::Sidecar)?;
+pub(super) fn fetch_signed(
+    url: &str,
+    signature_url: &str,
+    keys: &[String],
+    http: &HttpOptions,
+) -> Result<String> {
+    let body = http::get_string(url, &[], Metadata::Document, http)?;
+    let signature = http::get_string(signature_url, &[], Metadata::Sidecar, http)?;
     let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
     verify::verify_minisign_bytes(body.as_bytes(), &keys, &signature)?;
     Ok(body)

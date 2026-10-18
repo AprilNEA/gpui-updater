@@ -135,7 +135,8 @@ impl<S: UpdateSource> UpdateEngine<S> {
             let fetch = Fetch::new(&hop.asset.url)
                 .expect_len(hop.asset.size)
                 .max_len(self.config.max_download_size)
-                .cancel(cancel);
+                .cancel(cancel)
+                .http(&self.config.http);
             http::download(&fetch, &file, &mut *progress)?;
             self.config
                 .verify_file(&file, Integrity::of_delta(hop), &hop.to)?;

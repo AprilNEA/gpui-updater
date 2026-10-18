@@ -187,6 +187,33 @@ release service:
 | `StaticManifestSource` | Cloudflare R2, S3, MinIO, B2, CDNs, static hosting | Fetches a static `latest.json`, selects an asset from `assets[]`, then downloads the asset URL directly. |
 | `AppcastSource` | Apps that publish (or want to publish) a Sparkle appcast | Fetches an appcast, picks the newest applicable `<item>` and the enclosure for this platform, and carries its `sparkle:edSignature`. |
 
+### Proxies and request headers
+
+By default every request uses the proxy from the environment (`ALL_PROXY`,
+`HTTPS_PROXY`, `HTTP_PROXY`, or their lowercase forms) and adds no headers.
+`HttpOptions` changes this. Give it to the source for metadata requests and
+to `EngineConfig::http` for the artifact, deltas, and their checksum and
+signature files:
+
+```rust
+use gpui_updater_core::{EngineConfig, HttpOptions, StaticManifestSource};
+
+let http = HttpOptions::new()
+    .header("authorization", "Bearer s3cr3t")
+    .proxy("http://proxy.internal:3128"); // or .no_proxy()
+let source = StaticManifestSource::new("https://updates.example.com/latest.json")
+    .http(http.clone());
+let config = EngineConfig::new(current_version).http(http);
+```
+
+Put a credential in `authorization`. A redirect drops it (and `cookie`), so
+the storage host behind a release asset never sees it. Every other header
+also goes to redirect targets. A header the source sets itself, such as the
+`authorization` from `GitHubSource::token`, takes precedence. HTTPS requests
+are tunnelled through the proxy, so TLS still ends at the update server.
+`HttpOptions`'s `Debug` output shows header names only, never values or the
+proxy URL.
+
 ### GitHub Releases
 
 ```rust

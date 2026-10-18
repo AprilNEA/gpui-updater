@@ -12,6 +12,7 @@
 //! Only HTTPS is spoken (see [`policy`]), and response sizes are bounded, so
 //! a hostile server cannot exhaust memory or disk.
 
+mod options;
 mod policy;
 
 use std::fs::{File, OpenOptions};
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
 
+pub use options::HttpOptions;
 use policy::Transport;
 pub(crate) use policy::{Metadata, ensure_secure};
 
@@ -89,38 +91,40 @@ fn tls_config() -> TlsConfig {
 
 /// Agent for small metadata requests: every phase through the (small) body is
 /// bounded, including DNS. Cheap to build; one per top-level call.
-fn metadata_agent() -> Agent {
-    Agent::config_builder()
+fn metadata_agent(http: &HttpOptions) -> Result<Agent> {
+    Ok(Agent::config_builder()
         .user_agent(USER_AGENT)
         .tls_config(tls_config())
         .https_only(true)
+        .proxy(http.resolve_proxy()?)
         .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(RECV_RESPONSE_TIMEOUT))
         .build()
-        .into()
+        .into())
 }
 
 /// Agent for artifact downloads: bounded DNS and connect, a stall cap of
 /// `stall` on body reads, and deliberately no receive-response deadline — see
 /// [`RECV_RESPONSE_TIMEOUT`] for why that would cap the whole body.
-fn download_agent(stall: Duration) -> Agent {
-    Agent::config_builder()
+fn download_agent(stall: Duration, http: &HttpOptions) -> Result<Agent> {
+    Ok(Agent::config_builder()
         .user_agent(USER_AGENT)
         .tls_config(tls_config())
         .https_only(true)
+        .proxy(http.resolve_proxy()?)
         .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_body(Some(stall))
         .build()
-        .into()
+        .into())
 }
 
 /// A GET for `url` that may only follow redirects `transport` allows.
 fn build(
     agent: &Agent,
     url: &str,
-    headers: &[(&str, &str)],
+    headers: &[(String, String)],
     transport: Transport,
 ) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
     let config = agent.get(url).config();
@@ -131,7 +135,7 @@ fn build(
     }
     .build();
     for (k, v) in headers {
-        req = req.header(*k, *v);
+        req = req.header(k.as_str(), v.as_str());
     }
     req
 }
@@ -193,7 +197,7 @@ fn retrying<T>(
 /// One GET that fails with a typed [`ureq::Error`] (a non-success status maps to
 /// [`ureq::Error::StatusCode`]) so [`retrying`] can classify it.
 fn get_bytes(agent: &Agent, request: &Request<'_>) -> std::result::Result<Vec<u8>, ureq::Error> {
-    let mut resp = build(agent, request.url, request.headers, request.transport).call()?;
+    let mut resp = build(agent, request.url, &request.headers, request.transport).call()?;
     let status = resp.status();
     if !status.is_success() {
         return Err(ureq::Error::StatusCode(status.as_u16()));
@@ -207,20 +211,25 @@ fn get_bytes(agent: &Agent, request: &Request<'_>) -> std::result::Result<Vec<u8
 /// One metadata request.
 struct Request<'a> {
     url: &'a str,
-    headers: &'a [(&'a str, &'a str)],
+    headers: Vec<(String, String)>,
     transport: Transport,
     kind: Metadata,
 }
 
 /// `GET` a metadata URL, retrying transient failures.
-fn get_metadata(url: &str, headers: &[(&str, &str)], kind: Metadata) -> Result<Vec<u8>> {
+fn get_metadata(
+    url: &str,
+    headers: &[(&str, &str)],
+    kind: Metadata,
+    http: &HttpOptions,
+) -> Result<Vec<u8>> {
     let request = Request {
         url,
-        headers,
+        headers: http.merge(headers),
         transport: Transport::of(url)?,
         kind,
     };
-    let agent = metadata_agent();
+    let agent = metadata_agent(http)?;
     retrying(|| get_bytes(&agent, &request)).map_err(|e| finalize(url, e))
 }
 
@@ -228,15 +237,21 @@ fn get_metadata(url: &str, headers: &[(&str, &str)], kind: Metadata) -> Result<V
 pub(crate) fn get_json<T: serde::de::DeserializeOwned>(
     url: &str,
     headers: &[(&str, &str)],
+    http: &HttpOptions,
 ) -> Result<T> {
-    let body = get_metadata(url, headers, Metadata::Document)?;
+    let body = get_metadata(url, headers, Metadata::Document, http)?;
     serde_json::from_slice(&body).map_err(|e| Error::Parse(e.to_string()))
 }
 
 /// `GET` a URL and return the body as text, retrying transient failures.
 /// A body larger than `kind` allows fails.
-pub(crate) fn get_string(url: &str, headers: &[(&str, &str)], kind: Metadata) -> Result<String> {
-    let bytes = get_metadata(url, headers, kind)?;
+pub(crate) fn get_string(
+    url: &str,
+    headers: &[(&str, &str)],
+    kind: Metadata,
+    http: &HttpOptions,
+) -> Result<String> {
+    let bytes = get_metadata(url, headers, kind, http)?;
     String::from_utf8(bytes).map_err(|e| Error::Parse(e.to_string()))
 }
 
@@ -253,6 +268,8 @@ pub(crate) struct Fetch<'a> {
     pub(crate) max_len: u64,
     /// Stops the download when cancelled.
     pub(crate) cancel: Option<&'a CancelToken>,
+    /// Extra headers and the proxy.
+    pub(crate) http: &'a HttpOptions,
 }
 
 impl<'a> Fetch<'a> {
@@ -263,7 +280,13 @@ impl<'a> Fetch<'a> {
             expected_len: None,
             max_len: u64::MAX,
             cancel: None,
+            http: &options::DEFAULT,
         }
+    }
+
+    /// Send the download with `http`'s headers and proxy.
+    pub(crate) fn http(self, http: &'a HttpOptions) -> Self {
+        Self { http, ..self }
     }
 
     /// Stop the download, with [`Error::Cancelled`], once `cancel` is
@@ -337,7 +360,7 @@ pub(crate) fn download(
     dest: &Path,
     progress: impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let agent = download_agent(BODY_STALL_TIMEOUT);
+    let agent = download_agent(BODY_STALL_TIMEOUT, fetch.http)?;
     let transfer = Transfer {
         agent: &agent,
         pre_body: PRE_BODY_TIMEOUT,
@@ -441,23 +464,17 @@ fn call_with_deadline(
     let (tx, rx) = mpsc::channel();
     let agent = transfer.agent.clone();
     let owned_url = url.to_string();
-    let owned_headers: Vec<(String, String)> = fetch
-        .headers
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect();
+    let mut own = vec![("accept", "application/octet-stream")];
+    own.extend_from_slice(fetch.headers);
+    let owned_headers = fetch.http.merge(&own);
     // On a deadline miss this thread stays blocked until the OS gives up on the
     // socket, then exits; its send into the dropped channel is ignored.
     thread::spawn(move || {
-        let mut req =
-            build(&agent, &owned_url, &[], transport).header("accept", "application/octet-stream");
+        let mut req = build(&agent, &owned_url, &owned_headers, transport);
         if let Some((range, validator)) = &range {
             req = req
                 .header("range", range.as_str())
                 .header("if-range", validator.as_str());
-        }
-        for (k, v) in &owned_headers {
-            req = req.header(k.as_str(), v.as_str());
         }
         let _ = tx.send(req.call());
     });

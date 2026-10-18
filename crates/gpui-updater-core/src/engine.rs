@@ -151,7 +151,8 @@ impl<S: UpdateSource> UpdateEngine<S> {
         let fetch = Fetch::new(&release.asset.url)
             .expect_len(release.asset.size)
             .max_len(self.config.max_download_size)
-            .cancel(cancel);
+            .cancel(cancel)
+            .http(&self.config.http);
         http::download(&fetch, &artifact, &mut progress)?;
         cancel.check()?;
         self.config
