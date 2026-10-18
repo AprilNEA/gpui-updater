@@ -28,7 +28,7 @@ jobs:
   # invisible to clippy run on a different host. The same holds for the Sparkle
   # driver: its Objective-C glue on macOS, its stub elsewhere.
   clippy:
-    name: clippy core + sparkle (${{ matrix.os }})
+    name: clippy core + sparkle + release (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +46,8 @@ jobs:
       - run: cargo doc -p gpui-updater-core --features delta --no-deps --locked
       - run: cargo clippy -p gpui-updater-sparkle --all-targets --locked -- -D warnings
       - run: cargo doc -p gpui-updater-sparkle --no-deps --locked
+      - run: cargo clippy -p gpui-updater-release --features cli,delta --all-targets --locked -- -D warnings
+      - run: cargo doc -p gpui-updater-release --features cli,delta --no-deps --locked
 
   # Core builds and tests at its own MSRV without GPUI. Running the
   # suite on every OS also compiles that platform's install strategy
@@ -53,7 +55,7 @@ jobs:
   # driver shares the MSRV; on macOS its `load_unbundled` test runs on the real
   # main thread.
   test:
-    name: core + sparkle MSRV tests (${{ matrix.os }})
+    name: core + sparkle + release MSRV tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -68,6 +70,8 @@ jobs:
       - run: cargo test -p gpui-updater-core --doc --locked
       - run: cargo test -p gpui-updater-core --features delta --doc --locked
       - run: cargo test -p gpui-updater-sparkle --all-targets --locked
+      - run: cargo test -p gpui-updater-release --features cli,delta --all-targets --locked
+      - run: cargo test -p gpui-updater-release --features cli,delta --doc --locked
 
   # Independent builds prevent workspace feature unification from concealing
   # a dependency on the other backend. Native app coverage stays with consumers.

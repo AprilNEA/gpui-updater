@@ -83,6 +83,12 @@ old one with the fresh delta before you publish it. Library users call
 [`create`] and [`delta_bases`] directly. Generation keeps whole files in
 memory and is CPU-heavy, so it belongs in CI, not in the app.
 
+[`gpui-updater-release`](https://github.com/AprilNEA/gpui-updater/tree/master/crates/gpui-updater-release)
+does the same from one tool: `delta bases`, `delta create` (always
+verified), and `sign minisign --version`, and its `manifest` command attaches
+the deltas it finds to their asset. Its `sparkle delta` makes Sparkle's own
+deltas for the `<sparkle:deltas>` of an appcast.
+
 # Publishing
 
 On GitHub Releases, name the delta `<asset>.from-<version>.delta`, for

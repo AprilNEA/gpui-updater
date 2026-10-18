@@ -4,6 +4,7 @@ members = [
     "crates/gpui-updater",
     "crates/gpui-updater-pre",
     "crates/gpui-updater-sparkle",
+    "crates/gpui-updater-release",
     "xtask",
 ]
 default-members = ["crates/gpui-updater-core"]

@@ -184,6 +184,12 @@ For R2- or S3-style hosting:
    verifies the manifest, upload `latest.json.minisig` with it, and re-sign it
    before its `expires` time.
 
+[`gpui-updater-release`](https://github.com/AprilNEA/gpui-updater/tree/master/crates/gpui-updater-release)
+does steps 3 and 4. `sign minisign --version v1.2.3` writes version-bound
+`.minisig` files. `manifest` writes `latest.json` from the release directory
+with sizes, hashes, signature URLs, deltas, OS minimums, and an optional
+`expires`, and fails when a required target is missing.
+
 # Sparkle appcasts
 
 [`AppcastSource`] reads the RSS feed that [Sparkle] (macOS) and WinSparkle
@@ -226,7 +232,16 @@ let engine = UpdateEngine::new(
   rollouts, critical updates, and verifying Sparkle 2.10's signed-feed
   comment. The engine always downloads the full archive. On macOS the engine
   installs only `.dmg` enclosures; a `.zip` or `.tar.xz` fails with a clear
-  error. Sparkle itself handles all formats.
+  error. Sparkle itself handles all formats, and applies the deltas.
+
+To write the feed without Xcode or Sparkle's `generate_appcast`, use
+`gpui-updater-release appcast`. It writes one feed per architecture with
+`sparkle:edSignature` on every enclosure. `gpui-updater-release sparkle delta`
+runs Sparkle's `BinaryDelta`, applies the result to check it, and names the
+file after the old `CFBundleVersion`, which Sparkle sends as
+`sparkle:deltaFrom`; `appcast` then lists it under `<sparkle:deltas>`. Sparkle
+uses a delta only when the installed `CFBundleVersion` equals `deltaFrom`, so
+keep `CFBundleVersion` stable and increasing.
 
 [Sparkle]: https://sparkle-project.org/
 

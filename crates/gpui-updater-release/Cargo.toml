@@ -1,0 +1,52 @@
+[package]
+name = "gpui-updater-release"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Release-side tooling for gpui-updater: static manifests, Sparkle appcasts, signing, Sparkle bundling, and binary deltas"
+readme = "README.md"
+keywords = ["updater", "sparkle", "appcast", "release", "minisign"]
+categories = ["development-tools", "command-line-utilities"]
+
+[features]
+default = []
+# Native `files-bsdiff-v1` deltas for the static manifest and the engine.
+delta = ["gpui-updater-core/delta"]
+# The `gpui-updater-release` command-line tool.
+cli = ["dep:clap"]
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4.5", optional = true, features = ["derive", "env", "wrap_help"] }
+# Signs Sparkle's `sparkle:edSignature`: plain Ed25519 over the file, from the
+# 32-byte seed that Sparkle's `generate_keys -x` exports.
+ed25519-compact = { version = "2.1", default-features = false, features = ["random"] }
+gpui-updater-core = { version = "0.4.1", path = "../gpui-updater-core" }
+minisign = "0.7"
+plist = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+roxmltree = "0.20"
+
+[[bin]]
+name = "gpui-updater-release"
+path = "src/bin/gpui-updater-release.rs"
+required-features = ["cli"]
+
+[package.metadata.docs.rs]
+# Document the `cli` and `delta` features too.
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true

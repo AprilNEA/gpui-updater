@@ -13,6 +13,8 @@ cargo test --workspace --doc --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy -p gpui-updater-core --features delta --all-targets --locked -- -D warnings
+cargo +1.85.0 test -p gpui-updater-release --features cli,delta --all-targets --locked
+cargo clippy -p gpui-updater-release --features cli,delta --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo xtask check-packages
 ```
@@ -26,10 +28,10 @@ restart request; official GPUI 0.2.2 discards its path, so exact-path coverage
 uses a small isolated handoff boundary. No test restarts a real app or
 installs over the test binary.
 
-`cargo xtask check-packages` packages all four crates without publishing,
+`cargo xtask check-packages` packages all five crates without publishing,
 checks the archive contents, builds fresh consumers from the extracted
-packages, and checks the selected normal and build dependency closures (core
-and Sparkle: no GPUI; official: no pre; pre: no official). Package locks may
+packages, and checks the selected normal and build dependency closures (core,
+Sparkle, and release: no GPUI; official: no pre; pre: no official). Package locks may
 list unrelated platform or optional dependencies; they are not evidence that
 those dependencies are compiled. Pass package names to check only those, for
 example `cargo xtask check-packages gpui-updater-core gpui-updater-pre` on a
@@ -84,8 +86,8 @@ RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc -p gpui-updater-core 
 ## Releasing
 
 Publish `gpui-updater-core` first. After it is available in the registry,
-publish `gpui-updater`, `gpui-updater-pre`, and `gpui-updater-sparkle` at the
-same version. Run the normal package verification again before publishing. A
+publish `gpui-updater`, `gpui-updater-pre`, `gpui-updater-sparkle`, and
+`gpui-updater-release` at the same version. Run the normal package verification again before publishing. A
 repository tag is not needed for registry resolution; if a coordinated release
 tag is created, `vX.Y.Z` should identify the published workspace commit. Never
 rewrite an existing release tag or embed a consumer's GPUI Git pin here.
