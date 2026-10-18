@@ -39,13 +39,18 @@ pub struct Installed {
 
 /// Install a downloaded update artifact over `install_root`.
 ///
-/// - `artifact`: the downloaded file (`.dmg` on macOS, `.tar.gz` on Linux,
-///   `.exe` or `.msi` on Windows). On macOS and Linux it may also be a
-///   directory holding an already-unpacked payload (the `.app` bundle or the
-///   executable), which is what [`UpdateEngine::download`](crate::UpdateEngine::download)
-///   returns after rebuilding an update from a delta.
-/// - `install_root`: what to replace — on macOS the `.app` bundle directory,
-///   on Linux the executable file. Use [`current_install_root`] to derive it.
+/// - `artifact`: the downloaded file (`.dmg` on macOS, `.tar.gz` or
+///   `.AppImage` on Linux, `.exe` or `.msi` on Windows). On macOS and Linux
+///   it may also be a directory holding an already-unpacked payload (the
+///   `.app` bundle or the executable), which is what
+///   [`UpdateEngine::download`](crate::UpdateEngine::download) returns after
+///   rebuilding an update from a delta.
+/// - `install_root`: what to replace — on macOS the `.app` bundle directory;
+///   on Linux the executable file, the `AppImage` file, or a directory that
+///   holds the whole app (replaced as a whole from the `.tar.gz`). Use
+///   [`current_install_root`] to derive it, or set
+///   [`EngineConfig::install_root`](crate::EngineConfig::install_root) to an
+///   app directory.
 ///
 /// # Errors
 /// Returns [`Error::Install`](crate::Error::Install) on any failure during
@@ -75,7 +80,9 @@ pub fn install(artifact: &Path, install_root: &Path) -> Result<Installed> {
 /// Best-effort path of the currently installed application to replace.
 ///
 /// On macOS this walks up from the running executable to the enclosing `.app`
-/// bundle; elsewhere it is the running executable itself.
+/// bundle. On Linux it is the `AppImage` file (`$APPIMAGE`) when the app runs
+/// from inside that `AppImage`'s mount (`$APPDIR`), and otherwise the running
+/// executable. On Windows it is the running executable.
 ///
 /// # Errors
 /// Returns [`Error::Io`](crate::Error::Io) if the current executable path
@@ -86,7 +93,11 @@ pub fn current_install_root() -> Result<PathBuf> {
     {
         Ok(macos::bundle_root(&exe).unwrap_or(exe))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(linux::appimage_root(&exe).unwrap_or(exe))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Ok(exe)
     }

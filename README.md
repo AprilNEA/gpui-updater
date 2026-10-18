@@ -8,8 +8,8 @@ GPUI ships no updater of its own, and Zed's `auto_update` crate is GPL-licensed
 and wired to Zed's private update server. `gpui-updater` is an independent,
 MIT/Apache implementation of the same idea: check a release source, download the
 platform artifact, verify it, and swap it into place — on macOS (`.dmg`),
-Linux (`.tar.gz`), and Windows (bare `.exe`, or `.msi` for installer-shipped
-apps).
+Linux (`.tar.gz` or `.AppImage`), and Windows (bare `.exe`, or `.msi` for
+installer-shipped apps).
 
 ## What it does
 
@@ -37,7 +37,10 @@ apps).
   - **macOS**: mount the `.dmg`, `ditto` the new (already-notarized) `.app` onto
     the target volume, then atomically replace the bundle. Nothing is re-signed
     at runtime — the new bundle carries its own signature.
-  - **Linux**: extract the `.tar.gz` and atomically replace the binary.
+  - **Linux**: extract the `.tar.gz` and atomically replace the binary. When
+    the install root is a directory (an `app.app/` with `bin/` and `lib/`,
+    as Zed ships), the whole directory is replaced instead. An app that runs
+    as an `AppImage` replaces the `.AppImage` file with the new one.
   - **Windows**: rename-in-place for a bare `.exe`, or a staged msiexec
     handoff for an `.msi` — the verified package is applied
     (`/passive /norestart`) after the app exits, via the restart path, then
@@ -124,6 +127,9 @@ Behavior changes:
 - `download` fails with `Location` or `Permission` before downloading when
   the update could not be installed where the app is. Before, the download
   finished and the install failed.
+- On Linux, `current_install_root` returns the `AppImage` file when the app
+  runs from inside its mount, not the executable in the read-only mount. An
+  install root that is a directory is replaced as a whole.
 
 ### Migrating from 0.2
 
@@ -367,7 +373,8 @@ You can also add filename substring filters with `asset_contains(...)`, or
 replace them completely with `asset_patterns(...)`. Matching is
 case-insensitive. If no selector is configured, the source falls back to a
 platform extension guess: `.dmg` on macOS, `.exe` on Windows, and `.tar.gz` on
-Linux/other platforms. Installer-shipped Windows apps should select their MSI
+Linux/other platforms. An `AppImage` app selects its asset with
+`asset_patterns(vec![".AppImage".into()])`. Installer-shipped Windows apps should select their MSI
 explicitly with `.format("msi")` — the install step stages it and applies via
 msiexec on restart.
 
@@ -781,6 +788,18 @@ reaches Sparkle's own settings (automatic checks and downloads).
   administrator privileges` prompt, as Velopack does) is not yet implemented —
   a permission error just surfaces as a failed update. Sparkle handles this
   case with its installer, which is one reason to use `gpui-updater-sparkle`.
+- **Linux app directories**: `current_install_root` cannot know that the
+  executable belongs to a larger directory, so set
+  `EngineConfig::install_root` to that directory. The `.tar.gz` may hold the
+  directory itself, a single wrapper folder such as `app-1.2.0/`, or the
+  directory's contents. When the running executable is inside the
+  directory, the update must hold an executable at the same relative path,
+  and that path is the restart path. A symlink to the directory is kept, and
+  the directory it points to is replaced.
+- **Linux `AppImage`**: the root is `$APPIMAGE` only when the running
+  executable is inside `$APPDIR`. A program started from another `AppImage`,
+  such as a terminal, inherits both variables; this check keeps it from
+  replacing that other `AppImage`.
 - **Linux and Windows** have no bundle metadata to check, so
   `BundleVersion` and `CodeSigning` only apply on macOS. Sign your artifacts
   and bind signatures to versions there instead.
