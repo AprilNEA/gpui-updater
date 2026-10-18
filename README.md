@@ -18,17 +18,24 @@ installer-shipped apps).
   checksum and an optional `.minisig` signature. `StaticManifestSource` reads a
   CDN/S3/R2-friendly `latest.json` with a flat asset list. `AppcastSource`
   reads a Sparkle / WinSparkle appcast. Bring your own by implementing
-  `UpdateSource`.
+  `UpdateSource`. `FallbackSource` tries several sources in order, such as a
+  CDN manifest first and GitHub Releases second.
 - **Verification** — the published size, SHA-256, and optional [minisign] or
   Sparkle-compatible Ed25519 (`sparkle:edSignature` / `SUPublicEDKey`)
   signatures, with minisign key rotation and signatures bound to a version. On
   macOS the new `.app` must declare the release version and carry the
   installed app's code-signing team; on Windows the `.exe` or `.msi` must
-  carry the installed app's Authenticode publisher. Static manifests can be signed and expire,
-  so a stale one cannot be replayed. Everything is fetched over HTTPS with
-  bounded sizes into a directory only the current user can access, but
-  transport security alone is not trusted. See
+  carry the installed app's Authenticode publisher. Static manifests can be
+  signed and expire, so a stale one cannot be replayed. Everything is fetched
+  over HTTPS with bounded sizes into a directory only the current user can
+  access, but transport security alone is not trusted. See
   [Verification and trust](#verification-and-trust).
+- **Downloads** — a retry resumes with an HTTP `Range` request instead of
+  starting over, and a verified download from an earlier run is reused.
+  `Updater::cancel` (or a `CancelToken`) stops a download. The proxy comes
+  from the environment (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`) or from
+  `HttpOptions`, which also adds request headers. See
+  [Proxies and request headers](#proxies-and-request-headers).
 - **Delta updates** (optional `delta` feature) — download small per-file
   patches instead of the full artifact (chained across several releases when
   needed) and rebuild the new `.app` bundle or executable from the installed
@@ -48,8 +55,17 @@ installer-shipped apps).
     the app exits, via the restart path, then the app relaunches. msiexec
     logs to `<package>.log`; exit code 3010 (reboot needed) counts as
     success. Call `UpdateEngine::remove_leftovers` at startup to delete the
-    `.old.exe` a bare-`.exe` update leaves behind. (Restart-Manager integration for locked sibling DLLs
-    remains future work.)
+    `.old.exe` a bare-`.exe` update leaves behind. (Restart Manager
+    integration for locked sibling DLLs remains future work.)
+- **Install location and ownership** — before downloading, the engine
+  rejects an App Translocation path on macOS and an install folder the user
+  cannot write to. `install::ownership` reports when Homebrew, apt, Flatpak,
+  Snap, Nix, Scoop, winget, or an app store owns the install, so the app can
+  point to that tool instead. See
+  [Installs a package manager owns](#installs-a-package-manager-owns).
+- **Errors** — every failure carries an `ErrorKind` (`Network`,
+  `Verification`, `Location`, `Permission`, `Cancelled`, and others), so the
+  app can choose what to tell the user.
 - **GPUI adapters** — an observable `Entity<Updater>` that
   runs the work on the background executor and sets `App::set_restart_path` when
   an update is staged. No background polling: trigger checks explicitly, which
@@ -858,8 +874,9 @@ reaches Sparkle's own settings (automatic checks and downloads).
   permission to it.
   An admin who drag-installed the app can replace it without a prompt; a
   standard user cannot. A privilege-escalation fallback (an `osascript … with
-  administrator privileges` prompt, as Velopack does) is not yet implemented —
-  a permission error just surfaces as a failed update. Sparkle handles this
+  administrator privileges` prompt, as Velopack does) is not yet implemented.
+  Instead, `UpdateEngine::check_location` reports the missing permission as
+  `ErrorKind::Permission` before anything is downloaded. Sparkle handles this
   case with its installer, which is one reason to use `gpui-updater-sparkle`.
 - **Linux app directories**: `current_install_root` cannot know that the
   executable belongs to a larger directory, so set
