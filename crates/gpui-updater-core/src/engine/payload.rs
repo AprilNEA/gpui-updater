@@ -42,7 +42,8 @@ pub(super) fn check(_artifact: &Path, _expect: &Expectations<'_>) -> Result<()> 
 #[cfg(target_os = "macos")]
 pub(super) fn check(artifact: &Path, expect: &Expectations<'_>) -> Result<()> {
     let team = match expect.code_signing {
-        CodeSigning::Off => None,
+        // `Publisher` names a Windows Authenticode signer; macOS ignores it.
+        CodeSigning::Off | CodeSigning::Publisher(_) => None,
         CodeSigning::TeamId(team) => Some(team.clone()),
         CodeSigning::MatchInstalled => macos::team_identifier(expect.installed),
     };
@@ -397,6 +398,40 @@ mod tests {
                 .cmp_precedence(&Version::new(0, 8, 13))
                 .is_eq()
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use std::path::Path;
+
+    use semver::Version;
+
+    use super::{BundleVersion, CodeSigning, Expectations, check};
+
+    fn checked(artifact: &Path, signing: &CodeSigning) -> crate::Result<()> {
+        let version = Version::new(1, 0, 0);
+        check(
+            artifact,
+            &Expectations {
+                version: &version,
+                installed: artifact,
+                bundle_version: BundleVersion::Ignore,
+                code_signing: signing,
+            },
+        )
+    }
+
+    #[test]
+    fn a_windows_publisher_is_ignored() {
+        // With nothing to check, the artifact is not opened, so a missing
+        // one passes. A Team ID opens it, so the same path fails.
+        let missing = Path::new("/nonexistent/gpui-updater/update.dmg");
+        let publisher = CodeSigning::Publisher("Example Corp".into());
+        assert!(checked(missing, &publisher).is_ok());
+        assert!(checked(missing, &CodeSigning::Off).is_ok());
+        let team = CodeSigning::TeamId("ABCDE12345".into());
+        assert!(checked(missing, &team).is_err());
     }
 }
 
