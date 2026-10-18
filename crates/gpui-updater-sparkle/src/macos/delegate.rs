@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 
 use block2::{Block, RcBlock};
-use gpui_updater_core::{DriverEvent, DriverEvents};
+use gpui_updater_core::{DriverEvent, DriverEvents, UpdateError};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -163,20 +163,37 @@ impl SparkleDelegate {
     }
 
     fn report_error(&self, error: &NSError) {
-        match classify(&error.domain().to_string(), error.code()) {
+        let root = root_cause(error);
+        let root_key = root
+            .as_ref()
+            .map(|root| (root.domain().to_string(), root.code()));
+        let root_key = root_key
+            .as_ref()
+            .map(|(domain, code)| (domain.as_str(), *code));
+        match classify(&error.domain().to_string(), error.code(), root_key) {
             ErrorDisposition::Ignore => {}
             ErrorDisposition::Settle => self.emit(DriverEvent::Settled),
-            ErrorDisposition::Fail => self.emit(DriverEvent::Failed(describe(error))),
+            ErrorDisposition::Fail(kind) => self.emit(DriverEvent::Failed(UpdateError::new(
+                kind,
+                describe(error, root.as_deref()),
+            ))),
         }
     }
 }
 
 /// Sparkle's own description, followed by the innermost underlying error
-/// (`NSUnderlyingErrorKey`), which carries the actual cause — Sparkle's
-/// top-level messages are generic, e.g. "An error occurred in retrieving
-/// update information".
-fn describe(error: &NSError) -> String {
+/// `root`, which carries the actual cause — Sparkle's top-level messages are
+/// generic, e.g. "An error occurred in retrieving update information".
+fn describe(error: &NSError, root: Option<&NSError>) -> String {
     let message = error.localizedDescription().to_string();
+    match root {
+        Some(root) => format!("{message} ({})", root.localizedDescription()),
+        None => message,
+    }
+}
+
+/// The innermost underlying error (`NSUnderlyingErrorKey`) of `error`.
+fn root_cause(error: &NSError) -> Option<Retained<NSError>> {
     let mut root = None;
     let mut next = underlying(error);
     // Bounded in case of a cyclic chain.
@@ -185,10 +202,7 @@ fn describe(error: &NSError) -> String {
         next = underlying(&current);
         root = Some(current);
     }
-    match root {
-        Some(root) => format!("{message} ({})", root.localizedDescription()),
-        None => message,
-    }
+    root
 }
 
 fn underlying(error: &NSError) -> Option<Retained<NSError>> {

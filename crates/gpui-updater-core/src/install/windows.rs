@@ -62,14 +62,14 @@ fn install_bare_exe(new_exe: &Path, install_root: &Path) -> Result<Installed> {
     let _ = fs::remove_file(&old);
     if install_root.exists() {
         fs::rename(install_root, &old)
-            .map_err(|e| Error::Install(format!("could not rename running exe: {e}")))?;
+            .map_err(|e| Error::install_io("could not rename running exe", &e))?;
     }
     if let Err(e) = fs::copy(new_exe, install_root) {
         // Roll back so we never leave the app without its executable.
         if old.exists() {
             let _ = fs::rename(&old, install_root);
         }
-        return Err(Error::Install(format!("could not place new exe: {e}")));
+        return Err(Error::install_io("could not place new exe", &e));
     }
 
     Ok(Installed {
@@ -85,7 +85,7 @@ fn stage_msi(msi: &Path, install_root: &Path) -> Result<Installed> {
     // binary once msiexec finishes.
     let script_path = msi.with_extension("apply.cmd");
     fs::write(&script_path, apply_script(msi, install_root)?)
-        .map_err(|e| Error::Install(format!("could not stage MSI apply script: {e}")))?;
+        .map_err(|e| Error::install_io("could not stage MSI apply script", &e))?;
     Ok(Installed {
         restart_path: Some(script_path),
     })

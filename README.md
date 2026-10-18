@@ -606,9 +606,27 @@ updater.update(cx, |u, cx| u.check(cx));
 ```
 
 `UpdateStatus`: `Idle → Checking → {UpToDate | Available(v)} →
-Downloading { downloaded, total } → Installing → Staged(v) | Errored(msg)`.
+Downloading { downloaded, total } → Installing → Staged(v) | Errored(error)`.
 `Downloading` carries live byte counts (`total` is `None` when the server omits
 `Content-Length`).
+`UpdateStatus` is `#[non_exhaustive]`, so match it with a wildcard arm.
+
+`Errored` carries an `UpdateError`. Its `Display` is the message to show, and
+`kind()` returns an `ErrorKind` that tells the UI what to do:
+
+| `ErrorKind` | Meaning | Typical UI |
+| --- | --- | --- |
+| `Network` | DNS, connect, timeout, or a non-success HTTP status | "Try again later" |
+| `Metadata` | The release metadata is malformed or lists no artifact for this platform | "Contact the developer" |
+| `Verification` | A checksum, signature, TLS, or policy check failed | Security warning; do not offer a retry |
+| `Location` | The app runs from a disk image or an App Translocation path | "Move the app to Applications" |
+| `Permission` | The user may not write where the update must go | "Ask an administrator" or a manual download |
+| `Install` | Installing failed for another reason | Manual download link |
+| `Unsupported` | No install strategy for this platform or artifact | Manual download link |
+| `Cancelled` | The operation was cancelled on request | Nothing |
+| `Other` | Anything else | Show the message |
+
+The engine's `Error::kind()` returns the same classification.
 
 Keep the entity alive while updating. Dropping it cancels its foreground task,
 but does not interrupt an already-running blocking download/install or roll it

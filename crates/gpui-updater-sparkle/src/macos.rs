@@ -11,7 +11,7 @@ mod item;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use gpui_updater_core::{DriverEvent, DriverEvents};
+use gpui_updater_core::{DriverEvent, DriverEvents, ErrorKind, UpdateError};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::AnyClass;
 use objc2::runtime::AnyObject;
@@ -98,9 +98,10 @@ impl Driver {
             return;
         }
         let Some(mtm) = MainThreadMarker::new() else {
-            events.emit(DriverEvent::Failed(
-                "Sparkle must be started on the main thread".into(),
-            ));
+            events.emit(DriverEvent::Failed(UpdateError::new(
+                ErrorKind::Other,
+                "Sparkle must be started on the main thread",
+            )));
             return;
         };
         let delegate = SparkleDelegate::new(mtm, events.clone(), &self.options);
@@ -122,9 +123,10 @@ impl Driver {
             ]
         };
         let Some(controller) = controller else {
-            events.emit(DriverEvent::Failed(
-                "Sparkle could not create its updater".into(),
-            ));
+            events.emit(DriverEvent::Failed(UpdateError::new(
+                ErrorKind::Other,
+                "Sparkle could not create its updater",
+            )));
             return;
         };
         // SAFETY: `updater` is a nonnull `SPUUpdater *` property of the
@@ -135,9 +137,9 @@ impl Driver {
         let started: Result<(), Retained<NSError>> =
             unsafe { msg_send![&updater, startUpdater: _] };
         if let Err(error) = started {
-            events.emit(DriverEvent::Failed(format!(
-                "Sparkle failed to start: {}",
-                error.localizedDescription()
+            events.emit(DriverEvent::Failed(UpdateError::new(
+                ErrorKind::Other,
+                format!("Sparkle failed to start: {}", error.localizedDescription()),
             )));
         }
         self.session = Some(Session {

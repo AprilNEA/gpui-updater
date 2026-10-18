@@ -58,7 +58,7 @@ fn replace_binary(new_bin: &Path, parent: &Path, name: &str, install_root: &Path
         fs::copy(new_bin, &tmp)?;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
         fs::rename(&tmp, install_root)
-            .map_err(|e| Error::Install(format!("could not replace binary: {e}")))
+            .map_err(|e| Error::install_io("could not replace binary", &e))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);

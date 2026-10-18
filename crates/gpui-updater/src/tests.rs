@@ -97,7 +97,10 @@ fn check_notifies_and_busy_requests_do_not_duplicate(cx: &mut TestAppContext) {
             UpdateStatus::Checking,
             UpdateStatus::UpToDate,
             UpdateStatus::Checking,
-            UpdateStatus::Errored("failed to parse release metadata: broken".into()),
+            UpdateStatus::Errored(UpdateError::new(
+                ErrorKind::Metadata,
+                "failed to parse release metadata: broken"
+            )),
         ]
     );
     // Preserve the existing API: unsuccessful/no-newer checks do not clear
@@ -276,8 +279,11 @@ fn unknown_length_and_verification_error_notify_without_install(cx: &mut TestApp
         total: None
     }));
     cx.read(|cx| {
-        assert_eq!(updater.read(cx).status(), &UpdateStatus::Errored(
-        "checksum mismatch: expected deadbeef, got ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()));
+        assert_eq!(updater.read(cx).status(), &UpdateStatus::Errored(UpdateError::new(
+                ErrorKind::Verification,
+                "checksum mismatch: expected deadbeef, got ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            ))
+        );
         assert_eq!(states.borrow().last(), Some(updater.read(cx).status()));
         assert!(updater.read(cx).task.is_none());
     });
@@ -311,7 +317,7 @@ fn install_error_notifies_and_preserves_target(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(states.borrow().contains(&UpdateStatus::Installing));
     cx.read(|cx| {
-        assert!(matches!(updater.read(cx).status(), UpdateStatus::Errored(message) if message.starts_with("install failed: tar extract failed:")));
+        assert!(matches!(updater.read(cx).status(), UpdateStatus::Errored(error) if error.kind() == ErrorKind::Install && error.message().starts_with("install failed: tar extract failed:")));
         assert_eq!(states.borrow().last(), Some(updater.read(cx).status()));
         assert!(updater.read(cx).task.is_none());
     });
@@ -385,7 +391,10 @@ fn official_restart_handoff_uses_installed_path_and_skips_none_or_error() {
         installed_status(Err(Error::Install("fixture".into())), version, |_| panic!(
             "no handoff expected"
         )),
-        UpdateStatus::Errored("install failed: fixture".into())
+        UpdateStatus::Errored(UpdateError::new(
+            ErrorKind::Install,
+            "install failed: fixture"
+        ))
     );
 }
 
@@ -458,7 +467,7 @@ fn driver_events_map_onto_status(cx: &mut TestAppContext) {
         },
         DriverEvent::Installing,
         DriverEvent::ReadyToRelaunch(Version::new(2, 0, 0)),
-        DriverEvent::Failed("fixture failure".into()),
+        DriverEvent::Failed(UpdateError::new(ErrorKind::Network, "fixture failure")),
         DriverEvent::UpToDate,
     ] {
         events.emit(event);
@@ -475,7 +484,7 @@ fn driver_events_map_onto_status(cx: &mut TestAppContext) {
             },
             UpdateStatus::Installing,
             UpdateStatus::Staged(Version::new(2, 0, 0)),
-            UpdateStatus::Errored("fixture failure".into()),
+            UpdateStatus::Errored(UpdateError::new(ErrorKind::Network, "fixture failure")),
             UpdateStatus::UpToDate,
         ]
     );

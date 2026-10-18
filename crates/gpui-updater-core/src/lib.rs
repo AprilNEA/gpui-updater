@@ -79,7 +79,7 @@ pub use engine::{
     Artifact, BundleVersion, CodeSigning, DEFAULT_MAX_DELTA_HOPS, DEFAULT_MAX_DOWNLOAD_SIZE,
     EngineConfig, UpdateEngine, Verification, VersionBinding,
 };
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use install::{Installed, current_install_root};
 pub use release::{
     Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, parse_version_lenient,
@@ -88,4 +88,4 @@ pub use release::{
 /// `semver` directly (e.g. `Version::parse(env!("CARGO_PKG_VERSION"))`).
 pub use semver::Version;
 pub use source::{AppcastSource, AppcastVersion, GitHubSource, StaticManifestSource, UpdateSource};
-pub use status::UpdateStatus;
+pub use status::{UpdateError, UpdateStatus};

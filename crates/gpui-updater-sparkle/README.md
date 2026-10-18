@@ -58,7 +58,7 @@ Sparkle's updater delegate callbacks become `UpdateStatus` changes:
 | `updater:willDownloadUpdate:withRequest:` | `Downloading { downloaded: 0, total: None }` |
 | `updater:willExtractUpdate:`, `updater:willInstallUpdate:` | `Installing` |
 | `updater:willInstallUpdateOnQuit:immediateInstallationBlock:` | `Staged(version)` |
-| `updater:didFinishUpdateCycleForUpdateCheck:error:` | `Errored(message)` for real errors; otherwise, if still checking, downloading, or installing, back to `Available(version)` when an update is known, else `Idle` |
+| `updater:didFinishUpdateCycleForUpdateCheck:error:` | `Errored(error)` for real errors; otherwise, if still checking, downloading, or installing, back to `Available(version)` when an update is known, else `Idle` |
 
 Versions come from `displayVersionString` (Sparkle's `shortVersionString`,
 falling back to `CFBundleVersion`), by the same rule as `AppcastSource`, so
@@ -66,6 +66,12 @@ both backends report the same version for the same feed. User choices
 (cancel, "remind me later", declining a check) are not errors. Error messages
 carry Sparkle's own text plus the innermost underlying cause, e.g. `… (The
 download request URL must use http or https …)`.
+
+The error's `ErrorKind` comes from the Sparkle error code. For example,
+`SURunningFromDiskImageError` and `SURunningTranslocated` become `Location`,
+`SUSignatureError` becomes `Verification`, and `SUDownloadError` becomes
+`Network`. A generic top-level error, such as `SUAppcastError`, takes the
+kind of its innermost cause, so a dropped connection reports `Network`.
 
 Sparkle does not expose byte progress to delegates; its own window shows the
 progress bar.

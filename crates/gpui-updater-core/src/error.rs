@@ -1,7 +1,12 @@
 //! Error types for the updater.
 
+use std::io;
+
 /// Errors produced while checking for, downloading, verifying, or installing an
 /// update.
+///
+/// Use [`Error::kind`] to decide what to tell the user; the variants carry the
+/// details.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -64,6 +69,23 @@ pub enum Error {
     #[error("install failed: {0}")]
     Install(String),
 
+    /// The app runs from a location it cannot update in place: a read-only
+    /// volume such as a mounted disk image, or the randomized read-only path
+    /// macOS App Translocation chose. Moving the app (for example into
+    /// `/Applications`) fixes it.
+    #[error("cannot update the app where it is: {0}")]
+    Location(String),
+
+    /// The current user may not write where the update must go, such as an
+    /// install directory owned by another user or by the system.
+    #[error("permission denied: {0}")]
+    Permission(String),
+
+    /// The operation was cancelled through a
+    /// [`CancelToken`](crate::CancelToken).
+    #[error("cancelled")]
+    Cancelled,
+
     /// A binary delta could not be created or applied: it is malformed, or the
     /// installed files are not the version it expects. The engine treats this
     /// as recoverable and falls back to the full download.
@@ -76,8 +98,128 @@ pub enum Error {
 
     /// An underlying I/O error.
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
+}
+
+impl Error {
+    /// What kind of failure this is, for choosing what to tell the user.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Http(_) => ErrorKind::Network,
+            Self::Parse(_) | Self::NoMatchingAsset { .. } => ErrorKind::Metadata,
+            Self::InsecureUrl(_)
+            | Self::ChecksumMismatch { .. }
+            | Self::Signature(_)
+            | Self::VerificationRequired(_)
+            | Self::Payload(_)
+            | Self::ManifestExpired { .. } => ErrorKind::Verification,
+            Self::Install(_) => ErrorKind::Install,
+            Self::Location(_) => ErrorKind::Location,
+            Self::Permission(_) => ErrorKind::Permission,
+            Self::Cancelled => ErrorKind::Cancelled,
+            Self::UnsupportedPlatform(_) => ErrorKind::Unsupported,
+            Self::Delta(_) => ErrorKind::Other,
+            Self::Io(e) => match e.kind() {
+                io::ErrorKind::PermissionDenied => ErrorKind::Permission,
+                io::ErrorKind::ReadOnlyFilesystem => ErrorKind::Location,
+                _ => ErrorKind::Other,
+            },
+        }
+    }
+
+    /// An install-step I/O failure, classified by its cause: no permission
+    /// becomes [`Error::Permission`], a read-only file system
+    /// [`Error::Location`], and anything else [`Error::Install`].
+    #[cfg_attr(
+        all(
+            not(test),
+            not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+        ),
+        expect(dead_code, reason = "only platforms with an install strategy call it")
+    )]
+    pub(crate) fn install_io(context: &str, e: &io::Error) -> Self {
+        let message = format!("{context}: {e}");
+        match e.kind() {
+            io::ErrorKind::PermissionDenied => Self::Permission(message),
+            io::ErrorKind::ReadOnlyFilesystem => Self::Location(message),
+            _ => Self::Install(message),
+        }
+    }
+}
+
+/// The broad class of an [`Error`], stable enough to drive user interface
+/// decisions: which message to show, and whether retrying can help.
+///
+/// Marked `#[non_exhaustive]`: match it with a wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// The network failed: DNS, connect, timeout, or a non-success HTTP
+    /// status. Retrying later may help.
+    Network,
+    /// The release metadata is malformed or lists no artifact for this
+    /// platform. The publisher has to fix it.
+    Metadata,
+    /// The update failed an integrity, authenticity, or transport-security
+    /// check, or the policy requires a check the release cannot satisfy. Do
+    /// not install it.
+    Verification,
+    /// The app runs from a location it cannot update in place, such as a disk
+    /// image or an App Translocation path. Moving the app fixes it.
+    Location,
+    /// The current user may not write where the update must go.
+    Permission,
+    /// Installing failed for another reason.
+    Install,
+    /// This platform or artifact type has no install strategy.
+    Unsupported,
+    /// The operation was cancelled on request.
+    Cancelled,
+    /// Anything else, such as a local I/O error.
+    Other,
 }
 
 /// Convenience alias for results returned by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_errors_are_classified_by_cause() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        let read_only = io::Error::from(io::ErrorKind::ReadOnlyFilesystem);
+        let other = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(Error::Io(denied).kind(), ErrorKind::Permission);
+        assert_eq!(Error::Io(read_only).kind(), ErrorKind::Location);
+        assert_eq!(Error::Io(other).kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn install_io_keeps_the_cause() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        let error = Error::install_io("could not replace binary", &denied);
+        assert!(matches!(error, Error::Permission(_)), "{error:?}");
+        assert!(error.to_string().contains("could not replace binary"));
+        let busy = io::Error::other("busy");
+        assert_eq!(Error::install_io("x", &busy).kind(), ErrorKind::Install);
+    }
+
+    #[test]
+    fn verification_failures_share_a_kind() {
+        for error in [
+            Error::InsecureUrl("http://x".into()),
+            Error::Signature("bad".into()),
+            Error::VerificationRequired("none".into()),
+            Error::Payload("team".into()),
+            Error::ManifestExpired {
+                expires: "2020-01-01T00:00:00Z".into(),
+            },
+        ] {
+            assert_eq!(error.kind(), ErrorKind::Verification, "{error:?}");
+        }
+        assert_eq!(Error::Http("503".into()).kind(), ErrorKind::Network);
+        assert_eq!(Error::Cancelled.kind(), ErrorKind::Cancelled);
+    }
+}

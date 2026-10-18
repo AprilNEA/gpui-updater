@@ -180,7 +180,7 @@ impl Updater {
             }
             DriverEvent::Installing => UpdateStatus::Installing,
             DriverEvent::ReadyToRelaunch(version) => UpdateStatus::Staged(version),
-            DriverEvent::Failed(message) => UpdateStatus::Errored(message),
+            DriverEvent::Failed(error) => UpdateStatus::Errored(error),
             DriverEvent::Settled => {
                 if !self.status.is_busy() {
                     return;
@@ -229,7 +229,7 @@ impl Updater {
                         this.set_status(UpdateStatus::Available(version), cx);
                     }
                     Ok(None) => this.set_status(UpdateStatus::UpToDate, cx),
-                    Err(e) => this.set_status(UpdateStatus::Errored(e.to_string()), cx),
+                    Err(e) => this.set_status(UpdateStatus::Errored(e.into()), cx),
                 }
             })
             .ok();
@@ -311,7 +311,7 @@ impl Updater {
                 Err(e) => {
                     this.update(cx, |this, cx| {
                         this.task = None;
-                        this.set_status(UpdateStatus::Errored(e.to_string()), cx);
+                        this.set_status(UpdateStatus::Errored(e.into()), cx);
                     })
                     .ok();
                     return;
@@ -365,7 +365,7 @@ fn installed_status(
             }
             UpdateStatus::Staged(version)
         }
-        Err(e) => UpdateStatus::Errored(e.to_string()),
+        Err(e) => UpdateStatus::Errored(e.into()),
     }
 }
 

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use semver::Version;
 
 use crate::release::Release;
+use crate::status::UpdateError;
 
 /// An external updater that runs the whole check → download → install →
 /// relaunch flow by itself.
@@ -79,8 +80,9 @@ pub enum DriverEvent {
     Installing,
     /// The update is staged; relaunching will run `version`.
     ReadyToRelaunch(Version),
-    /// The current operation failed. The message is shown to the user.
-    Failed(String),
+    /// The current operation failed. The error's message is shown to the
+    /// user; its kind tells the app what kind of failure it was.
+    Failed(UpdateError),
     /// The driver finished its session (for example, the user dismissed an
     /// update prompt or cancelled a download). Nothing is in flight any more.
     Settled,

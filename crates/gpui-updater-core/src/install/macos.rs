@@ -51,16 +51,14 @@ fn swap_in(new_app: &Path, app_root: &Path) -> Result<Installed> {
     let _ = fs::remove_dir_all(&backup);
     if app_root.exists() {
         fs::rename(app_root, &backup)
-            .map_err(|e| Error::Install(format!("could not move current app aside: {e}")))?;
+            .map_err(|e| Error::install_io("could not move current app aside", &e))?;
     }
     if let Err(e) = fs::rename(&staging, app_root) {
         if backup.exists() {
             let _ = fs::rename(&backup, app_root);
         }
         let _ = fs::remove_dir_all(&staging);
-        return Err(Error::Install(format!(
-            "could not move new app into place: {e}"
-        )));
+        return Err(Error::install_io("could not move new app into place", &e));
     }
     let _ = fs::remove_dir_all(&backup);
 
