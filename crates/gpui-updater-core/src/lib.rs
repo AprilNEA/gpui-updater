@@ -21,10 +21,24 @@
 //! - `delta` (behind the `delta` feature) — binary delta updates: create a
 //!   per-file bsdiff delta in release CI, and let the engine rebuild the new
 //!   version from the installed one, falling back to the full download on any
-//!   problem. See the README's "Delta updates" section.
+//!   problem.
 //! - [`UpdateStatus`] — backend-independent state used by the separate
 //!   `gpui-updater` (official GPUI) and `gpui-updater-pre` adapters, whichever
 //!   backend (engine or driver) they run.
+//!
+//! # Guides
+//!
+//! | Topic | Page |
+//! | --- | --- |
+//! | Choosing a source, the static manifest format, appcasts, proxies and request headers | [`source`] |
+//! | Verification and trust: transport, the checks, policies, key rotation, signed manifests | [`verify`] |
+//! | Install strategies, the install location check, installs a package manager owns, platform notes | [`install`] |
+//! | Delta updates: enabling, generating, publishing, measurements (feature `delta`) | [delta module](delta/index.html) |
+//! | Error kinds and what to show the user | [`ErrorKind`] |
+//! | Status values for a user interface | [`UpdateStatus`] |
+//!
+//! For a GPUI app, start with the `gpui-updater` or `gpui-updater-pre` crate,
+//! which wraps the engine in an observable entity.
 //!
 //! # Example (blocking engine)
 //!
@@ -58,6 +72,7 @@
 //! [GPUI]: https://www.gpui.rs/
 
 // Panicking on failure is the point of a test assertion.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod cancel;

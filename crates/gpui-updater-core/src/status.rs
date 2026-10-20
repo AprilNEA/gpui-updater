@@ -8,6 +8,15 @@ use crate::error::{Error, ErrorKind};
 
 /// Observable state of an update operation.
 ///
+/// ```text
+/// Idle → Checking → UpToDate | Available(v)
+///                               → Downloading { downloaded, total } → Installing → Staged(v)
+/// any operation → Errored(error)
+/// ```
+///
+/// `Downloading` carries live byte counts. A cancelled download returns to
+/// `Available(v)`, not `Errored`.
+///
 /// Marked `#[non_exhaustive]`: later versions may add states, so match it
 /// with a wildcard arm.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

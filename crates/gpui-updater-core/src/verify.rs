@@ -1,4 +1,5 @@
 //! Integrity and authenticity checks for downloaded artifacts.
+#![doc = include_str!("../docs/verification.md")]
 
 use std::fmt::Write as _;
 use std::fs::File;

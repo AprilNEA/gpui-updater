@@ -1,104 +1,47 @@
 # gpui-updater
 
+[![crates.io](https://img.shields.io/crates/v/gpui-updater.svg)](https://crates.io/crates/gpui-updater)
+[![docs.rs](https://img.shields.io/docsrs/gpui-updater-core)](https://docs.rs/gpui-updater-core)
+[![CI](https://github.com/AprilNEA/gpui-updater/actions/workflows/ci.yml/badge.svg)](https://github.com/AprilNEA/gpui-updater/actions/workflows/ci.yml)
+
 Cross-platform self-update for [GPUI] desktop apps, hosted on GitHub Releases,
-static JSON manifests, or [Sparkle] appcasts — and, on macOS, optionally driven
+static JSON manifests, or [Sparkle] appcasts, and on macOS optionally driven
 by Sparkle itself.
 
 GPUI ships no updater of its own, and Zed's `auto_update` crate is GPL-licensed
 and wired to Zed's private update server. `gpui-updater` is an independent,
-MIT/Apache implementation of the same idea: check a release source, download the
-platform artifact, verify it, and swap it into place — on macOS (`.dmg`),
-Linux (`.tar.gz` or `.AppImage`), and Windows (bare `.exe`, or `.msi` for
-installer-shipped apps).
+MIT/Apache implementation of the same idea: check a release source, download
+the platform artifact, verify it, and swap it into place.
 
-## What it does
+## Features
 
-- **Sources** — `GitHubSource` reads a repo's Releases (latest or pre-releases),
-  picks the asset for the running platform, and resolves a `SHA256SUMS`
-  checksum and an optional `.minisig` signature. `StaticManifestSource` reads a
-  CDN/S3/R2-friendly `latest.json` with a flat asset list. `AppcastSource`
-  reads a Sparkle / WinSparkle appcast. Bring your own by implementing
-  `UpdateSource`. `FallbackSource` tries several sources in order, such as a
-  CDN manifest first and GitHub Releases second.
-- **Verification** — the published size, SHA-256, and optional [minisign] or
-  Sparkle-compatible Ed25519 (`sparkle:edSignature` / `SUPublicEDKey`)
-  signatures, with minisign key rotation and signatures bound to a version. On
-  macOS the new `.app` must declare the release version and carry the
-  installed app's code-signing team; on Windows the `.exe` or `.msi` must
-  carry the installed app's Authenticode publisher. Static manifests can be
-  signed and expire, so a stale one cannot be replayed. Everything is fetched
-  over HTTPS with bounded sizes into a directory only the current user can
-  access, but transport security alone is not trusted. See
-  [Verification and trust](#verification-and-trust).
-- **Downloads** — a retry resumes with an HTTP `Range` request instead of
-  starting over, and a verified download from an earlier run is reused.
-  `Updater::cancel` (or a `CancelToken`) stops a download. The proxy comes
-  from the environment (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`) or from
-  `HttpOptions`, which also adds request headers. See
-  [Proxies and request headers](#proxies-and-request-headers).
-- **Delta updates** (optional `delta` feature) — download small per-file
-  patches instead of the full artifact (chained across several releases when
-  needed) and rebuild the new `.app` bundle or executable from the installed
-  one. Any problem falls back to the full download. See
-  [Delta updates](#delta-updates).
-- **Install** — platform-native swaps:
-  - **macOS**: mount the `.dmg`, `ditto` the new (already-notarized) `.app` onto
-    the target volume, then atomically replace the bundle. Nothing is re-signed
-    at runtime — the new bundle carries its own signature.
-  - **Linux**: extract the `.tar.gz` and atomically replace the binary. When
-    the install root is a directory (an `app.app/` with `bin/` and `lib/`,
-    as Zed ships), the whole directory is replaced instead. An app that runs
-    as an `AppImage` replaces the `.AppImage` file with the new one.
-  - **Windows**: rename-in-place for a bare `.exe`, or a staged msiexec
-    handoff for an `.msi` — the verified package is applied
-    (`/passive /norestart` by default; `MsiUi` picks `/qb` or `/quiet`) after
-    the app exits, via the restart path, then the app relaunches. msiexec
-    logs to `<package>.log`; exit code 3010 (reboot needed) counts as
-    success. Call `UpdateEngine::remove_leftovers` at startup to delete the
-    `.old.exe` a bare-`.exe` update leaves behind. (Restart Manager
-    integration for locked sibling DLLs remains future work.)
-- **Install location and ownership** — before downloading, the engine
-  rejects an App Translocation path on macOS and an install folder the user
-  cannot write to. `install::ownership` reports when Homebrew, apt, Flatpak,
-  Snap, Nix, Scoop, winget, or an app store owns the install, so the app can
-  point to that tool instead. See
-  [Installs a package manager owns](#installs-a-package-manager-owns).
-- **Errors** — every failure carries an `ErrorKind` (`Network`,
-  `Verification`, `Location`, `Permission`, `Cancelled`, and others), so the
-  app can choose what to tell the user.
-- **GPUI adapters** — an observable `Entity<Updater>` that
-  runs the work on the background executor and sets `App::set_restart_path` when
-  an update is staged. No background polling: trigger checks explicitly, which
-  suits a privacy-conscious "Check for updates" button.
-- **Sparkle driver** (`gpui-updater-sparkle`) — hands the whole flow on macOS
-  to Sparkle 2 (installs for standard users, installs on quit, delta updates,
-  Sparkle's UI) behind the same `Entity<Updater>` and `UpdateStatus`.
+| Feature | What it does | Guide |
+| --- | --- | --- |
+| Update sources | GitHub Releases, static JSON manifests on S3, R2, or any CDN, and Sparkle or WinSparkle appcasts. A fallback source tries a second host; implement `UpdateSource` for your own service. | [`source`][source] |
+| Verification | Size, SHA-256, [minisign] and Sparkle Ed25519 signatures, version-bound signatures, key rotation, and signed manifests that expire. On macOS, the bundle version and code-signing team; on Windows, the Authenticode publisher. | [`verify`][verify] |
+| Downloads | HTTPS only, into a private directory. Retries resume with HTTP `Range`, a verified earlier download is reused, and a download can be cancelled. Proxies and request headers are configurable. | [Retries][retries], [proxies][proxies] |
+| Delta updates | Optional `delta` feature: per-file bsdiff deltas, chained across releases, with a fallback to the full download. On OpenLogi's macOS releases, a delta was 7–12% of the full download. | [`delta`][delta] |
+| Install | macOS `.dmg`; Linux `.tar.gz`, app directories, and AppImages; Windows bare `.exe` and `.msi`. | [`install`][install] |
+| Location and ownership | Rejects App Translocation, read-only, and unwritable install locations before downloading, and detects installs that Homebrew, apt, Flatpak, Snap, Nix, Scoop, winget, or an app store owns. | [Location][location], [ownership][ownership] |
+| Errors | Every failure carries an `ErrorKind`, so the app can choose what to tell the user. | [`ErrorKind`][errorkind] |
+| GPUI entity | An observable `Entity<Updater>` that runs the work on the background executor. There is no background polling: the app triggers each check. | [`gpui_updater`][adapter] |
+| Sparkle driver | Hands the whole macOS flow to Sparkle 2, behind the same entity and status. | [`gpui_updater_sparkle`][sparkle-docs] |
+
+## Crates
+
+| Crate | Use it for | Rust |
+| --- | --- | --- |
+| [`gpui-updater-core`][core] | The blocking engine, without GPUI | 1.85 |
+| [`gpui-updater`][adapter] | Apps on registry `gpui` `^0.2.2` | 1.98 |
+| [`gpui-updater-pre`][adapter-pre] | Apps on `gpui-pre` `^0.3.4` | 1.98 |
+| [`gpui-updater-sparkle`][sparkle-docs] | Sparkle 2 on macOS, next to either adapter | 1.85 |
+
+The core and the two adapters are alternatives, not dependencies to combine;
+`gpui-updater-sparkle` is additive. Both adapters re-export the entire core
+API, and only the adapters export `Updater`. The Rust versions are tested
+support floors (1.85.0 and 1.98.1), not a claim that older compilers fail.
 
 ## Installation
-
-Since **0.1.0** the blocking engine is separate from two independent GPUI
-adapters. **0.2.0** adds Sparkle appcasts, Ed25519 verification, and the
-Sparkle driver. **0.3.0** adds delta updates (optional `delta` feature),
-version-bound signatures, key rotation, signed manifests, and macOS bundle
-checks, and requires HTTPS with bounded downloads into a private directory,
-with a few breaking changes (see [Migrating from 0.2](#migrating-from-02)).
-**0.4.0** classifies errors by `ErrorKind`, makes downloads cancellable and
-resumable, adds proxies and request headers, `FallbackSource`, install
-location checks, Authenticode checks on Windows, Linux app directories and
-AppImages, and package-manager detection, with a few breaking changes (see
-[Migrating from 0.3](#migrating-from-03)).
-Pick the adapter matching your application's GPUI package:
-
-| Package | Backend | Rust requirement |
-| --- | --- | --- |
-| `gpui-updater-core` | None (blocking I/O engine) | 1.85; tested on 1.85.0 |
-| `gpui-updater` | Registry `gpui` `^0.2.2` | 1.98; tested on 1.98.1 |
-| `gpui-updater-pre` | Registry `gpui-pre` `^0.3.4` | 1.98; tested on 1.98.1 |
-| `gpui-updater-sparkle` | Sparkle 2 on macOS (loaded at run time); add it next to an adapter | 1.85; tested on 1.85.0 |
-
-Adapter requirements are conservative tested support floors, not a claim that
-older compilers necessarily fail. They do not raise the core's requirement.
-Registry dependencies for the 0.4 releases:
 
 ```toml
 [dependencies]
@@ -117,851 +60,87 @@ gpui-updater = { package = "gpui-updater-pre", version = "0.4" }
 gpui-updater-sparkle = "0.4"
 ```
 
-The core and the two adapters are alternatives, not dependencies to combine;
-`gpui-updater-sparkle` is additive. Both adapters re-export
-the entire core API, including `EngineConfig`, `Verification`, `Version`,
-`StaticManifestSource`, `Release`, `Installed`, `UpdateStatus`, and `UpdateEngine`.
-Only the adapters export `Updater`. Without the alias, pre imports use
-`gpui_updater_pre`. Before a release is published, use the corresponding
-`crates/<package>` path from this checkout.
+Add `features = ["delta"]` to the core or adapter dependency for delta
+updates. Without the alias, pre imports use `gpui_updater_pre`.
 
-### Migrating from 0.3
+## Quick start
 
-Breaking changes:
-
-- `UpdateStatus::Errored(String)` → `Errored(UpdateError)`. Show the error
-  with its `Display` (or `message()`), and branch on `kind()`, an
-  `ErrorKind`. See [GPUI entity](#gpui-entity) for what each kind means.
-- `DriverEvent::Failed(String)` → `Failed(UpdateError)`. A custom driver
-  builds one with `UpdateError::new(ErrorKind::Install, message)`.
-- `UpdateStatus` is now `#[non_exhaustive]`: add a wildcard arm to matches.
-
-New, with no change needed: `Updater::cancel`, `CancelToken` with
-`UpdateEngine::download_cancellable`, `UpdateDriver::cancel` (defaults to
-doing nothing), `Release::published_at` / `release_url`, `HttpOptions`,
-`FallbackSource`, `UpdateEngine::check_location` / `install::check_location`,
-`CodeSigning::Publisher`, `InstallOptions` / `MsiUi` with
-`EngineConfig::install_options` and `install::install_with`,
-`UpdateEngine::remove_leftovers` / `install::remove_leftovers`, and
-`install::ownership` / `UpdateEngine::ownership` with `Ownership`,
-`OwnershipHints`, and `PackageManager`.
-
-Behavior changes:
-
-- Dropping the `Updater` now cancels a running download; before, the
-  download ran on to the end.
-- A download that fails mid-body continues with a `Range` request when the
-  server allows it, instead of starting over.
-- With `EngineConfig::download_dir`, an earlier download that still verifies
-  is reused instead of downloaded again.
-- `download` fails with `Location` or `Permission` before downloading when
-  the update could not be installed where the app is. Before, the download
-  finished and the install failed.
-- On Linux, `current_install_root` returns the `AppImage` file when the app
-  runs from inside its mount, not the executable in the read-only mount. An
-  install root that is a directory is replaced as a whole.
-- On Windows, `CodeSigning::MatchInstalled` (the default) now checks
-  Authenticode: an app with a valid signature takes only updates signed by
-  the same publisher. Before, nothing was checked on Windows. Opt out with
-  `.code_signing(CodeSigning::Off)`.
-- The `.msi` apply script relaunches the app after exit code 3010 (installed,
-  reboot needed); before, it treated 3010 as a failure. It also writes
-  `<package>.log`.
-
-### Migrating from 0.2
-
-- `EngineConfig::minisign_public_key` (the field) became
-  `minisign_public_keys: Vec<String>`. The builder method of the same name is
-  unchanged and may be called more than once to trust several keys.
-- On macOS, downloads are now checked before install: the `.app` must declare
-  the release version, and when the installed app is signed by a team, the
-  update must be validly signed by the same team. Opt out with
-  `.bundle_version(BundleVersion::Ignore)` or `.code_signing(CodeSigning::Off)`.
-- `UpdateEngine::download` returns an `Artifact` instead of a `PathBuf`, and
-  `UpdateEngine::install` takes `&Artifact`, so the engine only installs a file
-  it downloaded and checked. Read the location with `artifact.path()`; call
-  `install::install` directly to install some other file on purpose.
-- Every request, and every redirect it follows, must use HTTPS. A plain
-  `http://` URL fails with `Error::InsecureUrl`, and `check()` rejects a
-  release whose artifact or `signature_url` is not HTTPS. Plain HTTP still
-  works for loopback hosts (`localhost`, `127.0.0.1`, `[::1]`), for local
-  testing.
-- A download is cut off once it exceeds the size the release publishes
-  (GitHub always publishes one) or, without one,
-  `EngineConfig::max_download_size` (4 GiB by default). Manifests, appcasts,
-  and GitHub API responses are limited to 10 MiB, signature and checksums
-  files to 1 MiB.
-- The default download directory is created fresh with owner-only permissions
-  (`0700` on Unix), and so is a configured `download_dir` the engine has to
-  create. Asset names from release metadata are reduced to a plain file name,
-  so a name such as `../x` cannot place the download outside that directory.
-- `Release` gains `deltas` (build it with `Release::new` / `with_deltas`), and
-  `Error` gains `Payload`, `ManifestExpired`, `Delta`, and `InsecureUrl`.
-
-### Migrating from 0.1
-
-- `Release`, `Asset`, and `EngineConfig` are `#[non_exhaustive]`. Build them
-  with `Release::new` / `Asset::new` / `EngineConfig::new` and the `with_*` or
-  builder methods; the fields stay public for reading and adjusting.
-  `EngineConfig` also gains `ed25519_public_key`.
-- Adapters: `Updater::restart` takes `&mut self`. It needs `Context<Self>`, so
-  it is called from `update` closures and call sites are unchanged.
-- Adapters: `Updater` is no longer `Send` or `Sync`, because it may hold a
-  main-thread-only driver such as `SparkleDriver`. `Entity<Updater>` is still
-  `Send + Sync`; only code that moves an `Updater` value itself across threads
-  is affected.
-- `Verification::Signature` and `Strict` also accept a valid Sparkle Ed25519
-  signature once `ed25519_public_key` is set. With only a minisign key
-  configured, verification behaves as before.
-- Then apply [Migrating from 0.2](#migrating-from-02).
-
-### Migrating from 0.0.x
-
-- Blocking consumers: replace `gpui-updater` with `gpui-updater-core` and change
-  imports to `gpui_updater_core` (or retain the old import via a Cargo alias).
-- GPUI consumers: select official or pre above and remove `features = ["gpui"]`.
-  `Updater::new`, `check`, `download_and_install`, `status`, `available`, and
-  `restart` retain their behavior. No update policy or polling is added.
-- The adapters depend only on core, never each other. Small GPUI bindings are
-  intentionally duplicated; download, verification, and install code are not.
-- Then apply [Migrating from 0.1](#migrating-from-01).
-
-Published adapters contain no baked-in Zed Git dependency. A consumer using a
-Git GPUI must patch **at its workspace root** so every dependency uses that
-same source, for example:
-
-```toml
-[patch.crates-io]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "<your-verified-commit>", version = "=0.2.2" }
-```
-
-The explicit version disambiguates package selection: some Zed revisions also
-contain a `gpui` 0.0.0 fixture, so a Git URL and revision alone are ambiguous.
-The Git package version must satisfy `^0.2.2`, and the commit must actually be
-API-compatible. No Git pin is claimed as verified by this workspace. An alias
-does not make `gpui-pre` and `gpui` interchangeable: they have distinct Cargo
-package/source identities and their `Entity`/`Context` types cannot be mixed.
-Adapters disable GPUI default features; the application selects its platform
-startup crate/features. No platform startup library is a mandatory adapter
-runtime dependency.
-
-## Usage
-
-### Pick an update source
-
-Use one of the built-in sources, or implement `UpdateSource` for your own
-release service:
-
-| Source | Best for | How it works |
-| --- | --- | --- |
-| `GitHubSource` | Existing GitHub Releases pipelines | Calls the GitHub Releases API, selects a matching asset, and can read `SHA256SUMS` / `.minisig` assets. |
-| `StaticManifestSource` | Cloudflare R2, S3, MinIO, B2, CDNs, static hosting | Fetches a static `latest.json`, selects an asset from `assets[]`, then downloads the asset URL directly. |
-| `AppcastSource` | Apps that publish (or want to publish) a Sparkle appcast | Fetches an appcast, picks the newest applicable `<item>` and the enclosure for this platform, and carries its `sparkle:edSignature`. |
-| `FallbackSource` | A mirror or second host for when the primary is down | Asks its sources in order and returns the release from the first one that answers. When all fail, returns the primary's error. |
-
-`FallbackSource::new(primary).or(mirror)` does not compare its sources: a
-primary that answers wins, even if the mirror knows a newer release. Each
-source verifies what it fetches with its own settings, such as a manifest's
-signing keys, and the engine verifies the artifact the same way whichever
-source named it.
-
-### Proxies and request headers
-
-By default every request uses the proxy from the environment (`ALL_PROXY`,
-`HTTPS_PROXY`, `HTTP_PROXY`, or their lowercase forms) and adds no headers.
-`HttpOptions` changes this. Give it to the source for metadata requests and
-to `EngineConfig::http` for the artifact, deltas, and their checksum and
-signature files:
+In a GPUI app, build the entity once, observe it, and drive it from a button:
 
 ```rust
-use gpui_updater_core::{EngineConfig, HttpOptions, StaticManifestSource};
+use gpui_updater::{EngineConfig, GitHubSource, UpdateStatus, Updater, Version};
 
-let http = HttpOptions::new()
-    .header("authorization", "Bearer s3cr3t")
-    .proxy("http://proxy.internal:3128"); // or .no_proxy()
-let source = StaticManifestSource::new("https://updates.example.com/latest.json")
-    .http(http.clone());
-let config = EngineConfig::new(current_version).http(http);
+let updater = cx.new(|cx| {
+    Updater::new(
+        GitHubSource::new("AprilNEA", "OpenLogi")
+            .asset_contains("macos")
+            .asset_contains(".dmg")
+            .with_checksums("SHA256SUMS"),
+        EngineConfig::new(Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+        cx,
+    )
+});
+cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+
+// In the "Check for updates" button handler:
+updater.update(cx, |updater, cx| match updater.status() {
+    UpdateStatus::Available(_) => updater.download_and_install(cx),
+    UpdateStatus::Downloading { .. } => updater.cancel(cx),
+    UpdateStatus::Staged(_) => updater.restart(cx),
+    _ => updater.check(cx),
+});
 ```
 
-Put a credential in `authorization`. A redirect drops it (and `cookie`), so
-the storage host behind a release asset never sees it. Every other header
-also goes to redirect targets. A header the source sets itself, such as the
-`authorization` from `GitHubSource::token`, takes precedence. HTTPS requests
-are tunnelled through the proxy, so TLS still ends at the update server.
-`HttpOptions`'s `Debug` output shows header names only, never values or the
-proxy URL.
-
-### GitHub Releases
+Without GPUI, the core runs the same steps as blocking calls:
 
 ```rust
-use gpui_updater_core::{EngineConfig, GitHubSource, UpdateEngine};
-use semver::Version;
-
-let source = GitHubSource::new("AprilNEA", "OpenLogi")
-    .asset_contains("macos")
-    .asset_contains(".dmg")
-    .with_checksums("SHA256SUMS")
-    .with_minisig();
+use gpui_updater_core::{EngineConfig, GitHubSource, UpdateEngine, Version};
 
 let engine = UpdateEngine::new(
-    source,
-    EngineConfig::new(Version::parse(env!("CARGO_PKG_VERSION"))?)
-        .minisign_public_key("RWQ…"), // optional
+    GitHubSource::new("AprilNEA", "OpenLogi").with_checksums("SHA256SUMS"),
+    EngineConfig::new(Version::parse(env!("CARGO_PKG_VERSION"))?),
 );
-
 if let Some(release) = engine.check()? {
     let artifact = engine.download(&release, |done, total| { /* progress */ })?;
     engine.install(&artifact)?;
 }
 ```
 
-### Static manifests (S3/R2/CDN)
-
-Use `StaticManifestSource` when your release metadata is hosted as a static JSON
-file on Cloudflare R2, AWS S3, MinIO, Backblaze B2, GitHub Pages, or any normal
-HTTPS file server. The updater does not speak the S3 API; it fetches JSON and
-downloads direct artifact URLs. This keeps credentials and provider SDKs out of
-the app: upload artifacts however you like, then publish a small JSON pointer.
-
-```rust
-use gpui_updater_core::{EngineConfig, StaticManifestSource, UpdateEngine};
-
-let source = StaticManifestSource::new("https://dl.example.com/channels/stable/latest.json")
-    .os("macos")
-    .arch("arm64")
-    .format("dmg");
-
-let engine = UpdateEngine::new(source, EngineConfig::new(current_version));
-```
-
-Manifest v1 describes one latest release and a flat list of downloadable assets.
-`schema_version`, `version`, `assets[].name`, and `assets[].url` are the only
-required fields; all other fields are optional and unknown fields are ignored.
-Put channel pointers at mutable URLs such as `/channels/stable/latest.json`, but
-keep artifact URLs versioned and immutable.
-
-Recommended layout:
-
-```text
-https://dl.example.com/
-├── channels/
-│   └── stable/
-│       └── latest.json          # mutable pointer
-└── releases/
-    └── v1.2.3/
-        ├── App-1.2.3-macos-arm64.dmg
-        ├── App-1.2.3-macos-arm64.dmg.minisig
-        └── SHA256SUMS
-```
-
-```json
-{
-  "schema_version": 1,
-  "app_id": "org.example.App",
-  "version": "1.2.3",
-  "tag": "v1.2.3",
-  "channel": "stable",
-  "published_at": "2026-06-01T12:00:00Z",
-  "expires": "2026-06-15T12:00:00Z",
-  "release_url": "https://example.com/releases/v1.2.3",
-  "notes": "Markdown release notes.",
-  "assets": [
-    {
-      "name": "App-1.2.3-macos-arm64.dmg",
-      "url": "https://dl.example.com/releases/v1.2.3/App-1.2.3-macos-arm64.dmg",
-      "os": "macos",
-      "arch": "arm64",
-      "format": "dmg",
-      "size": 12345678,
-      "sha256": "0123456789abcdef...",
-      "signature": null,
-      "signature_url": null,
-      "minimum_os_version": "13.0"
-    }
-  ]
-}
-```
-
-`size`, `sha256`, `signature` (inline minisign signature), `signature_url`
-(detached signature file), and `ed25519_signature` (base64, as Sparkle's
-`sign_update` prints it) are checked after download as described in
-[Verification and trust](#verification-and-trust). If both `signature` and
-`signature_url` are present, the inline signature is used. `expires` only
-matters for a signed manifest; see there too.
-
-`published_at` (RFC 3339) and `release_url` fill `Release::published_at` and
-`Release::release_url`, for a "published on" line and a "View release" link.
-Both are for display only. A `published_at` that does not parse, or a
-`release_url` that is not an `http(s)` URL, is dropped; the check does not
-fail. `GitHubSource` fills the same fields from the release's `published_at`
-and `html_url`, and `AppcastSource` from the item's `<pubDate>` and `<link>`.
-
-Asset selection is explicit when you use `os`, `arch`, and `format`:
-
-```rust
-let source = StaticManifestSource::new("https://dl.example.com/channels/stable/latest.json")
-    .os("macos")
-    .arch("arm64")
-    .format("dmg");
-```
-
-You can also add filename substring filters with `asset_contains(...)`, or
-replace them completely with `asset_patterns(...)`. Matching is
-case-insensitive. If no selector is configured, the source falls back to a
-platform extension guess: `.dmg` on macOS, `.exe` on Windows, and `.tar.gz` on
-Linux/other platforms. An `AppImage` app selects its asset with
-`asset_patterns(vec![".AppImage".into()])`. Installer-shipped Windows apps should select their MSI
-explicitly with `.format("msi")` — the install step stages it and applies via
-msiexec on restart.
-
-For R2/S3-style hosting, the recommended release flow is:
-
-1. Build and sign/notarize platform artifacts.
-2. Upload artifacts to an immutable, versioned prefix such as
-   `/releases/v1.2.3/`.
-3. Generate SHA-256 hashes and, optionally, minisign signatures.
-4. Upload `latest.json` to a mutable channel prefix such as
-   `/channels/stable/latest.json` after all artifacts are in place. If the
-   app verifies the manifest, upload `latest.json.minisig` with it, and
-   re-sign it before its `expires` time.
-
-### Verification and trust
-
-**Transport and staging.** Every request, including each redirect it
-follows, must use HTTPS; plain HTTP is accepted only for loopback hosts, for
-local testing. Downloads land in a fresh directory that only the current user
-can access, under a file name reduced to its last path component, and
-`UpdateEngine::install` accepts only the `Artifact` that `download` returns,
-so nothing reaches the installer without passing the checks below. HTTPS
-protects the transfer; whether the file is trusted is decided by those checks.
-
-**Retries and resuming.** A download that fails with a transient network
-error (a dropped connection, a timeout, a 5xx status) is retried with
-backoff. When the server named the body with a strong `ETag` or a
-`Last-Modified` date, the retry asks for the rest only, with `Range` and
-`If-Range`. The file continues only if the server answers `206` for exactly
-that range; any other answer starts the file over. Up to five attempts in a
-row may fail without moving the download forward. Resuming works within one
-`download` call; a new call starts over. The checks below always run on the
-whole file.
-
-**Reusing a finished download.** With `EngineConfig::download_dir`, the
-directory persists between downloads. If it already holds the release's
-artifact, of the published size, and that file passes a published checksum
-or signature and the payload check, `download` returns it without fetching
-anything. An app that restarts between downloading and installing therefore
-does not download again. A file that nothing published can check is
-downloaded again.
-
-Every downloaded file, the full artifact or a delta, goes through the same
-checks, in this order:
-
-1. **Size.** When the release publishes one (`size` in a manifest; GitHub
-   always does), a response announcing another size is rejected and a body
-   growing past it is cut off. Without a published size, the body is cut off
-   at `EngineConfig::max_download_size` (4 GiB by default). Either way a
-   hostile mirror cannot fill the disk.
-2. **SHA-256** against the inline `sha256` or the release's checksums file.
-3. **Signatures.** A minisign signature (inline `signature`, else
-   `signature_url`) made by any configured public key, and a Sparkle-style
-   Ed25519 signature (`ed25519_signature`) checked against
-   `ed25519_public_key`. Every signature that is published *and* has a
-   configured key is verified; any mismatch fails the download.
-4. **Signed version.** If the signature's trusted comment contains
-   `version:<semver>`, it must equal the version the file is supposed to be:
-   the release version, or for a delta the version it produces. Sign with
-   `minisign -S -m App.dmg -t "version:1.2.3"`. This stops an older, validly
-   signed artifact from being served as a newer release.
-   `VersionBinding::Required` also rejects signatures without the token, once
-   all your releases carry it. Ed25519 signatures cover the file alone and
-   cannot name a version; on macOS check 5 covers them.
-5. **App bundle (macOS).** The `.app` in the update must declare the release
-   version as `CFBundleShortVersionString` (`BundleVersion::MustMatch`, where
-   `1.2` matches `1.2.0`). When the installed app is signed by a team, the
-   update must pass `codesign --verify --deep --strict` and be signed by the
-   same Team ID (`CodeSigning::MatchInstalled`). Pin a team with
-   `CodeSigning::TeamId("…")`, or turn either check off. A delta-rebuilt
-   bundle failing these checks falls back to the full download. Like
-   Sparkle, this keeps a stolen minisign key alone from shipping someone
-   else's app.
-6. **Authenticode (Windows).** When the installed `.exe` has a valid
-   Authenticode signature, the downloaded `.exe` or `.msi` must have a valid
-   one whose certificate has the same common name (CN), such as
-   `Example Corp` (`CodeSigning::MatchInstalled`, as electron-updater's
-   `publisherName`). Pin a publisher with `CodeSigning::Publisher("…")`.
-   An unsigned installed app is not checked. The check runs PowerShell's
-   `Get-AuthenticodeSignature`, so it accepts what Windows trusts, catalog
-   signatures included. When PowerShell cannot read a signature, of the
-   update or of the installed app, the download fails with `Error::Payload`
-   (`ErrorKind::Verification`) instead of skipping the check. Where
-   PowerShell is blocked, turn the check off with `CodeSigning::Off`.
-   Windows executables need not declare a version, so `BundleVersion` does
-   not apply.
-
-By default (`Verification::BestEffort`) checks 2 and 3 are skipped when their
-input is absent, so an unsigned release still installs. To **fail closed**,
-set a stricter policy:
-
-```rust
-use gpui_updater_core::Verification;
-
-EngineConfig::new(current_version)
-    .minisign_public_key("RWQ…")
-    .verification(Verification::Strict);
-```
-
-| Policy | Behaviour |
-| ------ | --------- |
-| `BestEffort` (default) | Verify what's available; skip missing checks (fails open). |
-| `Off` | Skip all checks, including the bundle checks (tests/local dev only). |
-| `Checksum` | Require a matching SHA-256. |
-| `Signature` | Require a public key **and** an advertised signature it can check (minisign or Ed25519). |
-| `Strict` | Require both a valid signature and a matching SHA-256. |
-
-Under `Signature`/`Strict`, a release that cannot be verified is rejected at
-`check()` time — before it is ever surfaced as available — and again before a
-download is verified.
-
-For the strongest setup, combine `Verification::Strict`, a `version:` token in
-every signature with `VersionBinding::Required`, and, for static manifests, a
-signed manifest with `expires` (see *Signed manifests* below).
-
-**Key rotation.** Call `minisign_public_key` more than once: a signature by
-any configured key is accepted. Ship a release that trusts both the old and
-the new key, then start signing with the new one.
-
-**Signed manifests.** Signed artifacts prove what a file is, but not that the
-manifest listing them is current. Whoever controls the host could keep
-serving an old manifest, so users never see a security fix (a *freeze*
-attack). `StaticManifestSource` can require the manifest itself to be signed:
-
-```rust
-let source = StaticManifestSource::new("https://dl.example.com/channels/stable/latest.json")
-    .minisign_public_key("RWQ…"); // verifies latest.json against latest.json.minisig
-```
-
-The bytes are verified before they are parsed; `.signature_url(…)` overrides
-the default `<url>.minisig`. With a top-level `"expires"` (RFC 3339) in the
-signed manifest, `check()` fails with `Error::ManifestExpired` after that time
-instead of reporting "up to date", which bounds how long a replay works.
-Re-sign the manifest on a schedule shorter than its lifetime, e.g. weekly with
-a two-week `expires`. Rollback is never possible: `check()` only offers
-versions newer than the running one.
-
-### Delta updates
-
-Enable the `delta` feature on whichever crate you depend on
-(`gpui-updater-core`, `gpui-updater`, or `gpui-updater-pre`). Nothing else
-changes in your app: `download` tries deltas from the running version first
-and otherwise behaves exactly as before.
-
-```toml
-gpui-updater = { version = "0.4", features = ["delta"] }
-```
-
-A delta in the `files-bsdiff-v1` format rebuilds the new install tree (the
-`.app` bundle on macOS, the executable on Linux) from the installed one. It
-works on unpacked content, because diffing the compressed `.dmg` or `.tar.gz`
-gains almost nothing. Each file is stored the cheapest way: copied from the
-installed tree (also across renames), patched with bsdiff, or stored whole.
-Patches and whole files are LZMA-compressed at the `xz -9e` level. Signed
-Mach-O images have the page hashes in their code signature zeroed before
-diffing and recomputed when the delta is applied, because those hashes change
-on every build and do not diff well. Every file records SHA-256 hashes of both
-the installed file it starts from and the exact file it must produce, so the
-rebuilt bundle is still byte-identical to the notarized one.
-
-**Chains.** When no delta starts at the running version, the engine chains
-deltas (`1.2.0 → 1.2.2 → 1.2.3`). It picks the chain with the fewest bytes, of
-at most `max_delta_hops` deltas (default 4), and only if that total is smaller
-than the full download.
-
-When an update is applied:
-
-1. Each delta is downloaded and verified under the same
-   [checks](#verification-and-trust) as the full artifact: size, `sha256`,
-   signature, and the signed version (the version the delta produces). Under
-   `Strict`, an unsigned delta is never downloaded.
-2. Its header must say exactly the `from -> to` it was listed with, so a
-   validly signed delta cannot be replayed for another upgrade.
-3. Each installed file is hashed before use. A user-modified or partially
-   updated install is rejected instead of being patched into a broken one.
-4. Each rebuilt file is hashed after writing. The next delta of a chain starts
-   from the result. The final directory holds the rebuilt bundle, which goes
-   through the macOS bundle checks and then `install` swaps it in exactly like
-   a mounted `.dmg`. Nothing is re-signed.
-
-If any step fails (no usable chain, a network error, a bad checksum or
-signature, a modified install), the failure is logged with `tracing::warn!`
-and the full artifact is downloaded instead. The progress callback then
-restarts from zero. Deltas never make an update fail. Turn them off at runtime
-with `EngineConfig::deltas(false)`. Windows still uses full downloads.
-
-**Generating deltas** (release CI). Pick the earlier releases to build deltas
-from, unpack each of them and the new build, then create one delta per base:
-
-```bash
-MAKE="cargo run -p gpui-updater-core --features delta --release --example make_delta --"
-$MAKE bases 1.2.2 1.2.1 1.2.0 1.1.9 1.1.8   # earlier releases, newest first
-$MAKE old/MyApp.app new/MyApp.app 1.2.2 1.2.3 MyApp-macos-arm64.dmg.from-1.2.2.delta --verify
-minisign -S -m MyApp-macos-arm64.dmg.from-1.2.2.delta -t "version:1.2.3"
-```
-
-`bases` prints the 3 newest earlier releases plus those 2, 4, 8, … releases
-further back (`--direct N` changes the 3). When every release is published
-this way, a user `d` releases behind reaches the newest one in at most
-⌊log₂ d⌋ + 1 deltas, while each release ships only a handful of them. Older
-installs just take the full download. `--verify` rebuilds the new build from
-the old one with the fresh delta before you publish it. Library users can call
-`gpui_updater_core::delta::create` and `delta::delta_bases` directly.
-Generation keeps whole files in memory and is CPU-heavy, so it belongs in CI,
-not in the app.
-
-**Publishing.** On GitHub Releases, name the delta
-`<asset>.from-<version>.delta`, e.g. `MyApp-macos-arm64.dmg.from-1.2.2.delta`.
-Its checksum is read from the same checksums file and its signature from
-`<delta name>.minisig`. Delta files are never picked as the main asset. To
-chain deltas attached to earlier releases, let the source see them:
-
-```rust
-let source = GitHubSource::new("AprilNEA", "OpenLogi")
-    .asset_contains("macos").asset_contains(".dmg")
-    .with_checksums("SHA256SUMS")
-    .with_minisig()
-    .delta_history(20); // still one API request
-```
-
-In a static manifest, list deltas on the asset they rebuild:
-
-```json
-{
-  "name": "MyApp-v1.2.3-macos-arm64.dmg",
-  "url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg",
-  "size": 19670263,
-  "sha256": "…",
-  "signature_url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg.minisig",
-  "deltas": [
-    {
-      "from": "1.2.2",
-      "url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg.from-1.2.2.delta",
-      "size": 1418292,
-      "sha256": "…",
-      "signature_url": "https://dl.example.com/releases/v1.2.3/MyApp-v1.2.3-macos-arm64.dmg.from-1.2.2.delta.minisig"
-    },
-    {
-      "from": "1.2.0",
-      "to": "1.2.2",
-      "url": "https://dl.example.com/releases/v1.2.2/MyApp-v1.2.2-macos-arm64.dmg.from-1.2.0.delta",
-      "size": 2079621,
-      "sha256": "…",
-      "signature_url": "https://dl.example.com/releases/v1.2.2/MyApp-v1.2.2-macos-arm64.dmg.from-1.2.0.delta.minisig"
-    }
-  ]
-}
-```
-
-`from` and `url` are required. `to` defaults to the manifest's `version`; set
-it to list deltas between earlier releases for chaining. `format` defaults to
-`files-bsdiff-v1`. A delta in an unknown format is ignored, so newer formats
-can be published next to older ones. Deltas take the same `sha256`,
-`signature`, `signature_url`, and `ed25519_signature` fields as assets, and
-the same policy applies: under `Strict`, a delta without a checksum and a
-signature you can check is skipped in favour of the full download.
-`AppcastSource` lists no deltas, so appcast feeds always get the full archive.
-
-Measured on [OpenLogi] macOS arm64 releases (19.7 MB `.dmg`, 51.4 MB unpacked):
-
-| Upgrade | Delta | Share of full download |
-| --- | --- | --- |
-| 0.8.12 → 0.8.13 | 1.42 MB | 7.2% |
-| 0.8.11 → 0.8.13 | 2.36 MB | 12.0% |
-| 0.8.11 → 0.8.12 → 0.8.13 (chain, not chosen) | 3.50 MB | 17.8% |
-
-Compared with plain bsdiff patches (bzip2-compressed), LZMA saved 18% and
-normalizing Mach-O code signatures another 6%.
-Generating a delta took about 18 s with 4 worker threads and a peak of about
-1 GB of memory, and the output is identical on every run. Downloading and
-applying it locally took under a second. The installed result was identical
-to the full 0.8.13 bundle, and `codesign --verify --deep --strict` and
-Gatekeeper (`spctl`, "Notarized Developer ID") both accepted it.
-
-### Sparkle appcasts
-
-`AppcastSource` reads the RSS feed that [Sparkle] (macOS) and WinSparkle
-(Windows) consume, so one feed can serve a Sparkle-driven macOS build and the
-built-in engine everywhere else:
-
-```rust
-use gpui_updater_core::{AppcastSource, EngineConfig, UpdateEngine, Verification};
-
-let source = AppcastSource::new("https://dl.example.com/appcast.xml")
-    .channel("beta"); // optional: also offer `sparkle:channel` "beta"
-
-let engine = UpdateEngine::new(
-    source,
-    EngineConfig::new(current_version)
-        .ed25519_public_key("pfIShU4dEXqPd5ObYNfDBiQWcXozk7estwzTnF9BamQ=") // SUPublicEDKey
-        .verification(Verification::Signature),
-);
-```
-
-- **Signatures** — the enclosure's `sparkle:edSignature` is verified against
-  `ed25519_public_key`, the same base64 key Sparkle's `generate_keys` prints
-  for `SUPublicEDKey`. Archives signed with Sparkle's `sign_update` or
-  `generate_appcast` verify unchanged (pinned by golden tests).
-- **Versions** — the crate orders by semver, so it compares
-  `sparkle:shortVersionString` (falling back to `sparkle:version`). Pick
-  `.version_field(AppcastVersion::BundleVersion)` if your `CFBundleVersion` is
-  itself a semantic version.
-- **Filters** — `sparkle:channel`, `sparkle:minimumSystemVersion` /
-  `maximumSystemVersion` (macOS), `sparkle:hardwareRequirements` (`arm64`), and
-  `sparkle:informationalUpdate` are honoured. Enclosures are matched on
-  `sparkle:os` (`macos` when absent; WinSparkle's `windows-x64` etc. on
-  Windows; `linux-x64` / `linux-arm64` / `linux` on Linux).
-- **Display fields** — the item's `<pubDate>` (RFC 2822) becomes
-  `Release::published_at`, and its `<link>` becomes `Release::release_url`
-  when it is an `http(s)` URL.
-- **Not supported** — Sparkle's own delta updates (`sparkle:deltas`), phased rollouts, critical updates, and
-  verifying Sparkle 2.10's signed-feed comment; the engine always downloads the
-  full archive. On macOS the engine installs only `.dmg` enclosures (a `.zip`
-  or `.tar.xz` fails with a clear error); Sparkle itself handles all formats.
-
-### Installs a package manager owns
-
-An app that Homebrew, apt, or Scoop installed should not replace itself. The
-package manager then reports a version it did not install, and its next
-upgrade can undo the update. Call `install::ownership` (or
-`UpdateEngine::ownership`) at startup. When it is not
-`Ownership::SelfUpdate`, show how to update instead of an update button.
-
-```rust
-use gpui_updater::{Ownership, OwnershipHints, current_install_root, install};
-
-// A distribution that builds the app sets MYAPP_UPDATE_EXPLANATION, as Zed's
-// packagers set ZED_UPDATE_EXPLANATION.
-let hints = OwnershipHints::new().explanation(option_env!("MYAPP_UPDATE_EXPLANATION"));
-let owner = current_install_root()
-    .map_or(Ownership::SelfUpdate, |root| install::ownership(&root, &hints));
-if !owner.is_self_update() {
-    // "installed by Homebrew (myapp)", and "brew upgrade myapp"
-    println!("{owner}: {}", owner.update_command().unwrap_or_default());
-}
-```
-
-The check does not block downloads; the app decides. It looks, in order, at:
-
-| Source | Recognized as |
-| --- | --- |
-| `OwnershipHints::explanation`, when not blank | `Ownership::Packager(text)` |
-| `/nix/store/…` | Nix |
-| `/snap/<name>/…` | Snap |
-| `/app/…` with `FLATPAK_ID`, or `…/flatpak/app/<id>/…` | Flatpak |
-| `<prefix>/Cellar/<formula>/…`, prefix from `HOMEBREW_PREFIX` or the defaults | Homebrew |
-| `…\scoop\apps\<app>\…`, or under `SCOOP` / `SCOOP_GLOBAL` | Scoop |
-| `<ChocolateyInstall>\lib\<package>\…` | Chocolatey |
-| `…\Microsoft\WinGet\Packages\<id>_<source>\…` | winget |
-| `C:\Program Files\WindowsApps\…` | Microsoft Store |
-| `Contents/_MASReceipt/receipt` in the bundle | Mac App Store |
-| A `Caskroom/<token>/<version>/<App>.app` symlink back to the app | Homebrew cask |
-| `dpkg-query --search`, then `rpm -qf`, then `pacman -Qo` (Linux) | apt, rpm, pacman |
-
-The Linux queries run with `LC_ALL=C` for at most two seconds each. A missing
-command, a timeout, or an unreadable folder does not claim the install, so
-the result is then `SelfUpdate`. Turn the queries off with
-`OwnershipHints::query_package_database(false)`.
-
-### GPUI entity
-
-Choose an adapter (see [Installation](#installation)); with the pre alias above
-the same imports work:
-
-```rust
-use gpui_updater::{EngineConfig, GitHubSource, UpdateStatus, Updater};
-
-let updater = cx.new(|cx| Updater::new(
-    GitHubSource::new("AprilNEA", "OpenLogi")
-        .asset_contains("macos").asset_contains(".dmg")
-        .with_checksums("SHA256SUMS"),
-    EngineConfig::new(current_version),
-    cx,
-));
-
-// Re-render on status changes:
-cx.observe(&updater, |_, _, cx| cx.notify()).detach();
-
-// Drive it from buttons:
-updater.update(cx, |u, cx| u.check(cx));
-// when status is Available → u.download_and_install(cx)
-// when status is Downloading → u.cancel(cx)
-// when status is Staged → u.restart(cx)
-```
-
-`UpdateStatus`: `Idle → Checking → {UpToDate | Available(v)} →
-Downloading { downloaded, total } → Installing → Staged(v) | Errored(error)`.
-`Downloading` carries live byte counts (`total` is `None` when the server omits
-`Content-Length`).
-`UpdateStatus` is `#[non_exhaustive]`, so match it with a wildcard arm.
-
-`Errored` carries an `UpdateError`. Its `Display` is the message to show, and
-`kind()` returns an `ErrorKind` that tells the UI what to do:
-
-| `ErrorKind` | Meaning | Typical UI |
-| --- | --- | --- |
-| `Network` | DNS, connect, timeout, or a non-success HTTP status | "Try again later" |
-| `Metadata` | The release metadata is malformed or lists no artifact for this platform | "Contact the developer" |
-| `Verification` | A checksum, signature, TLS, or policy check failed | Security warning; do not offer a retry |
-| `Location` | The app runs from a disk image or an App Translocation path | "Move the app to Applications" |
-| `Permission` | The user may not write where the update must go | "Ask an administrator" or a manual download |
-| `Install` | Installing failed for another reason | Manual download link |
-| `Unsupported` | No install strategy for this platform or artifact | Manual download link |
-| `Cancelled` | The operation was cancelled on request | Nothing |
-| `Other` | Anything else | Show the message |
-
-The engine's `Error::kind()` returns the same classification.
-
-`Location` and `Permission` come before anything is downloaded.
-`UpdateEngine::download` first calls `UpdateEngine::check_location`, which
-rejects an App Translocation path on macOS. It then creates and removes a
-probe file next to the install root: installing replaces the app from inside
-that folder. A Windows `.msi` skips the probe, because msiexec elevates
-itself. Call `check_location` yourself to tell the user before offering the
-download; `install::check_location` does the same for any path.
-
-`cancel` stops a download. The status returns to `Available(v)`, not
-`Errored`, and the partial file is removed. The download stops at its next
-checkpoint: after each 64 KiB of the body, during a retry wait, or while it
-waits for response headers. A body read that has stalled can take up to the
-30-second stall timeout. An install that has started cannot be cancelled.
-Without the entity, pass a `CancelToken` to
-`UpdateEngine::download_cancellable`.
-
-Keep the entity alive while updating. Dropping it cancels a running download,
-as `cancel` does, but does not interrupt an install that has started or roll
-it back. A completed download may remain on disk. A check that finds no newer
-release or fails retains the previous `available()` release, as in 0.0.x.
-
-### Sparkle on macOS
-
-`gpui-updater-sparkle` provides `SparkleDriver`, an `UpdateDriver` that hands
-checking, downloading, installing, and relaunching to Sparkle 2. Build the
-entity with `Updater::with_driver` instead of `Updater::new` (both adapters
-have it); views keep using `UpdateStatus` and the same `check` /
-`download_and_install` / `restart` calls.
-
-```rust
-use gpui_updater::{AppcastSource, EngineConfig, Updater};
-use gpui_updater_sparkle::{SparkleDriver, SparkleOptions};
-
-let updater = cx.new(|cx| match SparkleDriver::load(SparkleOptions::new()) {
-    // Running from a bundle that embeds Sparkle.framework.
-    Ok(Some(sparkle)) => Updater::with_driver(sparkle, cx),
-    // `cargo run`, other platforms, or a misconfigured bundle: same feed,
-    // built-in engine.
-    _ => Updater::new(
-        AppcastSource::new(FEED_URL),
-        EngineConfig::new(current_version).ed25519_public_key(SU_PUBLIC_ED_KEY),
-        cx,
-    ),
-});
-```
-
-Sparkle is loaded at run time from `Contents/Frameworks/Sparkle.framework`, so
-`cargo build` and `cargo test` never need it. The bundle must embed and sign
-the framework and set `SUPublicEDKey` and `SUFeedURL` in `Info.plist`; see the
-[crate README](crates/gpui-updater-sparkle/README.md) for the checklist, the
-call mapping, and the end-to-end smoke test. `Updater::driver_mut::<SparkleDriver>()`
-reaches Sparkle's own settings (automatic checks and downloads).
+The [`gpui_updater`][adapter] documentation covers status values, errors,
+cancelling, and the Sparkle driver. The [`gpui_updater_core`][core]
+documentation lists a guide for each topic.
 
 ## Platform notes
 
-- **macOS** (built-in engine) replacing an app in `/Applications` needs write
-  permission to it.
-  An admin who drag-installed the app can replace it without a prompt; a
-  standard user cannot. A privilege-escalation fallback (an `osascript … with
-  administrator privileges` prompt, as Velopack does) is not yet implemented.
-  Instead, `UpdateEngine::check_location` reports the missing permission as
-  `ErrorKind::Permission` before anything is downloaded. Sparkle handles this
-  case with its installer, which is one reason to use `gpui-updater-sparkle`.
-- **Linux app directories**: `current_install_root` cannot know that the
-  executable belongs to a larger directory, so set
-  `EngineConfig::install_root` to that directory. The `.tar.gz` may hold the
-  directory itself, a single wrapper folder such as `app-1.2.0/`, or the
-  directory's contents. When the running executable is inside the
-  directory, the update must hold an executable at the same relative path,
-  and that path is the restart path. A symlink to the directory is kept, and
-  the directory it points to is replaced.
-- **Linux `AppImage`**: the root is `$APPIMAGE` only when the running
-  executable is inside `$APPDIR`. A program started from another `AppImage`,
-  such as a terminal, inherits both variables; this check keeps it from
-  replacing that other `AppImage`.
-- **Linux** has no bundle metadata or platform code signature to check, so
-  `BundleVersion` and `CodeSigning` do not apply there, and on Windows only
-  `CodeSigning` does. Sign your artifacts and bind signatures to versions
-  instead.
-- Adapters need their GPUI backend's native toolchain (including Xcode/Metal
-  where required on macOS). Core does not need GPUI or a graphics toolchain.
-- **Linux with registry `gpui` 0.2.2**: libc 0.2.190 removed `ENOATTR`, which
-  breaks `xattr` 0.2.3 (pulled in by `gpui_http_client` → `zed-async-tar`). If
-  a fresh lockfile picks that libc, hold it back with
-  `cargo update -p libc --precise 0.2.189`. `gpui-pre` is not affected.
+| Platform | Artifacts | Code signature check | Notes |
+| --- | --- | --- | --- |
+| macOS | `.dmg` | Bundle version and code-signing team | A standard user cannot replace an app in `/Applications`; the engine reports `ErrorKind::Permission` before downloading. Sparkle's installer handles this case. |
+| Linux | `.tar.gz`, app directories, `.AppImage` | None: sign the artifacts | Set `EngineConfig::install_root` for an app directory. |
+| Windows | bare `.exe`, `.msi` | Authenticode publisher | Call `UpdateEngine::remove_leftovers` at startup. Deltas are not supported. |
 
-## Development notes
+The [`install`][install] guide has the details. The adapters need their GPUI
+backend's native toolchain, including Xcode and Metal on macOS; the core
+needs neither GPUI nor a graphics toolchain.
 
-The workspace defaults to core; `cargo test` is not adapter coverage. Run:
+Known issue: on Linux with registry `gpui` 0.2.2, libc 0.2.190 removed
+`ENOATTR`, which breaks `xattr` 0.2.3 (pulled in by `gpui_http_client` →
+`zed-async-tar`). If a fresh lockfile picks that libc, hold it back with
+`cargo update -p libc --precise 0.2.189`. `gpui-pre` is not affected.
 
-```bash
-cargo +1.85.0 test -p gpui-updater-core --all-targets --locked
-cargo +1.85.0 test -p gpui-updater-core --features delta --all-targets --locked
-cargo test --workspace --all-targets --locked
-cargo test --workspace --doc --locked
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy -p gpui-updater-core --features delta --all-targets --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-cargo xtask check-packages
-```
+## Upgrading
 
-The `delta` feature adds `qbsdiff` and a pure-Rust bzip2 (both only used to
-create deltas; applying them uses this crate's own bounds-checked bspatch) and
-the pure-Rust `lzma-rust2`.
-qbsdiff's suffix sorting builds a small C library (`cdivsufsort`), so the
-feature needs a C compiler, as `ring` already does.
+[MIGRATING.md](MIGRATING.md) lists the breaking changes of each release:
+[from 0.3](MIGRATING.md#migrating-from-03),
+[from 0.2](MIGRATING.md#migrating-from-02),
+[from 0.1](MIGRATING.md#migrating-from-01), and
+[from 0.0.x](MIGRATING.md#migrating-from-00x). The
+[releases page](https://github.com/AprilNEA/gpui-updater/releases) lists
+what each release adds.
 
-CI tests core/platform installers on Linux, macOS and Windows, and builds each
-registry adapter independently on Linux. Adapter tests use GPUI's seeded test
-executor, local one-shot HTTP fixtures, and temporary install roots. They
-exercise observer notifications, busy guards, progress timing, errors, and
-entity/task lifetime. `gpui-pre` captures the fake platform restart request;
-official 0.2.2 discards its path, so exact-path coverage uses a small isolated
-handoff boundary. No test restarts a real app or installs over the test binary.
+## Contributing
 
-`cargo xtask check-packages` packages all four crates without publishing,
-checks archive contents, builds fresh consumers from extracted packages, and
-checks the selected normal/build dependency closures (core and Sparkle: no
-GPUI; official: no pre; pre: no official). Package locks may list unrelated
-platform/optional dependencies; they are not evidence that those dependencies
-are compiled. Pass package names to check only those, for example
-`cargo xtask check-packages gpui-updater-core gpui-updater-pre` on a Mac
-without the Metal toolchain.
-
-Release order: publish `gpui-updater-core` 0.4.0 first; after it is available in
-the registry, publish `gpui-updater`, `gpui-updater-pre` and
-`gpui-updater-sparkle` 0.4.0. Run normal package verification again before
-publishing. A repository tag is not needed for registry resolution; if a
-coordinated release tag is created, `v0.4.0` should identify the published
-workspace commit. Never rewrite an existing release tag or embed a consumer's
-GPUI Git pin here.
-
-On macOS inside some Nix shells, Cargo may pick Nix's clang wrapper as `cc` and
-fail to link build scripts with missing system symbols such as `__Unwind_*` or
-`_pthread_*`. Point Cargo at Apple's linker for the host target:
-
-```bash
-CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc cargo test
-```
-
-The same prefix works for `cargo check` and `cargo clippy`.
+[CONTRIBUTING.md](CONTRIBUTING.md) lists the checks to run, the release
+order, and where documentation lives.
 
 ## License
 
@@ -973,6 +152,18 @@ Licensed under either of
 at your option.
 
 [GPUI]: https://www.gpui.rs/
-[minisign]: https://jedisct1.github.io/minisign/
-[OpenLogi]: https://github.com/AprilNEA/OpenLogi
 [Sparkle]: https://sparkle-project.org
+[minisign]: https://jedisct1.github.io/minisign/
+[core]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/
+[source]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/source/index.html
+[proxies]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/source/index.html#proxies-and-request-headers
+[verify]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/verify/index.html
+[retries]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/verify/index.html#retries-and-resuming
+[delta]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/delta/index.html
+[install]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/install/index.html
+[location]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/install/index.html#install-location
+[ownership]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/install/index.html#installs-a-package-manager-owns
+[errorkind]: https://docs.rs/gpui-updater-core/latest/gpui_updater_core/enum.ErrorKind.html
+[adapter]: https://docs.rs/gpui-updater/latest/gpui_updater/
+[adapter-pre]: https://docs.rs/gpui-updater-pre/latest/gpui_updater_pre/
+[sparkle-docs]: https://docs.rs/gpui-updater-sparkle/latest/gpui_updater_sparkle/

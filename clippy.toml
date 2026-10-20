@@ -1,3 +1,3 @@
 # Product names that clippy's `doc_markdown` would otherwise ask to backtick.
 # `..` keeps clippy's built-in list (macOS, GitHub, …).
-doc-valid-idents = ["WinSparkle", ".."]
+doc-valid-idents = ["WinSparkle", "AppImage", "MinIO", ".."]

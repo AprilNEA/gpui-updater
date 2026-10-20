@@ -1,14 +1,5 @@
 //! Replacing the installed application with a freshly downloaded artifact.
-//!
-//! The strategy is platform-specific:
-//! - **macOS**: mount the `.dmg`, copy the new `.app` onto the same volume as
-//!   the current bundle with `ditto` (preserving its existing notarized
-//!   signature), then swap it into place. The new bundle carries its own
-//!   signature, so nothing is re-signed at runtime.
-//! - **Linux**: extract the `.tar.gz` and atomically replace the binary.
-//! - **Windows**: rename-in-place for a bare `.exe`, or a
-//!   staged msiexec handoff for an `.msi` (applied after the app exits, via
-//!   the restart path).
+#![doc = include_str!("../../docs/install.md")]
 
 use std::path::{Path, PathBuf};
 

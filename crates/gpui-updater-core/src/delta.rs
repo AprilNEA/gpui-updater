@@ -35,14 +35,8 @@
 //! minisign, exactly like a full artifact; the signature then authenticates the
 //! per-file hashes as well.
 //!
-//! # Publishing
-//!
-//! Run [`create`] in release CI for each old version in [`delta_bases`]: the few
-//! most recent releases plus a skip list further back. The engine chains
-//! deltas when none starts at the installed version, picking the chain with
-//! the fewest bytes, and falls back to the full artifact when that is smaller.
-//!
 //! [bsdiff]: https://www.daemonology.net/bsdiff/
+#![doc = include_str!("../docs/delta.md")]
 
 mod apply;
 mod bspatch;

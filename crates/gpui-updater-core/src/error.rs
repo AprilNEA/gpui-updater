@@ -150,6 +150,25 @@ impl Error {
 /// The broad class of an [`Error`], stable enough to drive user interface
 /// decisions: which message to show, and whether retrying can help.
 ///
+/// [`Error::kind`] and [`UpdateError::kind`](crate::UpdateError::kind)
+/// return the same classification. A typical user interface reacts like
+/// this:
+///
+/// | Kind | Typical user interface |
+/// | --- | --- |
+/// | [`Network`](Self::Network) | "Try again later" |
+/// | [`Metadata`](Self::Metadata) | "Contact the developer" |
+/// | [`Verification`](Self::Verification) | A security warning; do not offer a retry |
+/// | [`Location`](Self::Location) | "Move the app to Applications" |
+/// | [`Permission`](Self::Permission) | "Ask an administrator", or a manual download |
+/// | [`Install`](Self::Install) | A manual download link |
+/// | [`Unsupported`](Self::Unsupported) | A manual download link |
+/// | [`Cancelled`](Self::Cancelled) | Nothing |
+/// | [`Other`](Self::Other) | Show the message |
+///
+/// `Location` and `Permission` come before anything is downloaded; see
+/// [`check_location`](crate::install::check_location).
+///
 /// Marked `#[non_exhaustive]`: match it with a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]

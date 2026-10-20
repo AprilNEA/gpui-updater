@@ -5,6 +5,7 @@
 //! [`AppcastSource`] (Sparkle / WinSparkle appcasts), plus
 //! [`FallbackSource`], which asks several of them in order; implement the
 //! trait yourself to read from a self-hosted endpoint, GitLab, etc.
+#![doc = include_str!("../../docs/sources.md")]
 
 mod appcast;
 mod dates;

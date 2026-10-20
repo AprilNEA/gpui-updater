@@ -11,25 +11,8 @@
 //! Sparkle, via `gpui-updater-sparkle`) runs the whole flow instead and
 //! reports [`DriverEvent`]s, which the entity maps onto the same
 //! [`UpdateStatus`]. Views do not need to know which backend is in use.
-//!
-//! ```no_run
-//! # use gpui::{AppContext as _, Context, Entity};
-//! # use gpui_updater::{EngineConfig, GitHubSource, UpdateStatus, Updater};
-//! # use gpui_updater::Version;
-//! fn build(cx: &mut Context<()>) {
-//!     let source = GitHubSource::new("AprilNEA", "OpenLogi")
-//!         .asset_contains("macos")
-//!         .asset_contains(".dmg")
-//!         .with_checksums("SHA256SUMS");
-//!     let version = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-//!     let updater: Entity<Updater> =
-//!         cx.new(|cx| Updater::new(source, EngineConfig::new(version), cx));
-//!
-//!     // Manual, opt-in check (no background polling):
-//!     updater.update(cx, |u, cx| u.check(cx));
-//! }
-//! ```
-
+#![doc = include_str!("../docs/guide.md")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::any::Any;
