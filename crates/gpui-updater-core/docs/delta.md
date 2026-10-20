@@ -17,7 +17,8 @@ page hashes in their code signature zeroed before diffing and recomputed when
 the delta is applied, because those hashes change on every build and do not
 diff well. Every file records the SHA-256 of the installed file it starts
 from and of the exact file it must produce, so the rebuilt bundle is still
-byte-identical to the notarized one.
+byte-identical to the notarized one. A rebuilt Windows `.exe` is
+byte-identical in the same way, so its Authenticode signature stays valid.
 
 # Applying an update
 
@@ -35,16 +36,28 @@ than the full download. Then:
 3. Each installed file is hashed before use. A user-modified or partially
    updated install is rejected instead of being patched into a broken one.
 4. Each rebuilt file is hashed after writing. The next delta of a chain
-   starts from the result. The final directory holds the rebuilt bundle. It
-   goes through the macOS bundle checks, and then `install` swaps it in
-   exactly like a mounted `.dmg`. Nothing is re-signed.
+   starts from the result. The final directory holds the rebuilt bundle or
+   executable. It goes through the same payload checks as the full artifact
+   (the bundle version and code signature on macOS, the Authenticode
+   signature on Windows). Then `install` puts it in place exactly like a
+   mounted `.dmg` or a downloaded `.exe`. Nothing is re-signed.
 
 If any step fails (no usable chain, a network error, a bad checksum or
 signature, a modified install), the failure is logged with `tracing::warn!`
 and the full artifact is downloaded instead. The progress callback then
 restarts from zero. Deltas never make an update fail. Turn them off at run
 time with [`EngineConfig::deltas(false)`](crate::EngineConfig::deltas).
-Windows still uses full downloads.
+
+# Windows
+
+On Windows, deltas rebuild a bare `.exe` release only. The install root (the
+running executable, or [`EngineConfig::install_root`]) and the release asset
+must both be `.exe` files. Otherwise the engine takes the full download and
+does not fetch a delta. So an `.msi` release always takes the full download:
+Windows Installer owns the files it installed, and replacing them would
+bypass it. The rebuilt executable goes into place with the same rename as a
+downloaded `.exe`, so keep calling [`UpdateEngine::remove_leftovers`] at
+startup.
 
 # Generating deltas
 
@@ -57,6 +70,9 @@ $MAKE bases 1.2.2 1.2.1 1.2.0 1.1.9 1.1.8   # earlier releases, newest first
 $MAKE old/MyApp.app new/MyApp.app 1.2.2 1.2.3 MyApp-macos-arm64.dmg.from-1.2.2.delta --verify
 minisign -S -m MyApp-macos-arm64.dmg.from-1.2.2.delta -t "version:1.2.3"
 ```
+
+For a Windows `.exe`, pass the two executables, for example
+`old\MyApp.exe new\MyApp.exe 1.2.2 1.2.3 MyApp-windows-x64.exe.from-1.2.2.delta`.
 
 `bases` prints the 3 newest earlier releases, plus the releases 2, 4, 8, …
 further back (`--direct N` changes the 3). When every release is published
@@ -144,7 +160,15 @@ under a second. The installed result was identical to the full 0.8.13
 bundle, and both `codesign --verify --deep --strict` and Gatekeeper (`spctl`,
 "Notarized Developer ID") accepted it.
 
+On Windows, measured on two signed releases of the GitHub CLI (`gh.exe`
+2.62.0 → 2.63.0, 50.5 MB), the delta was 0.90 MB, 1.8% of the new `.exe`.
+The rebuilt `gh.exe` was identical to 2.63.0, and its Authenticode signature
+(`GitHub, Inc.`) passed [`CodeSigning::MatchInstalled`].
+
 [`UpdateEngine::download`]: crate::UpdateEngine::download
+[`UpdateEngine::remove_leftovers`]: crate::UpdateEngine::remove_leftovers
+[`EngineConfig::install_root`]: crate::EngineConfig::install_root
+[`CodeSigning::MatchInstalled`]: crate::CodeSigning::MatchInstalled
 [`max_delta_hops`]: crate::EngineConfig::max_delta_hops
 [`Verification::Strict`]: crate::Verification::Strict
 [`delta_history`]: crate::GitHubSource::delta_history

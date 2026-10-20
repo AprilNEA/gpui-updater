@@ -116,7 +116,7 @@ documentation lists a guide for each topic.
 | --- | --- | --- | --- |
 | macOS | `.dmg` | Bundle version and code-signing team | A standard user cannot replace an app in `/Applications`; the engine reports `ErrorKind::Permission` before downloading. Sparkle's installer handles this case. |
 | Linux | `.tar.gz`, app directories, `.AppImage` | None: sign the artifacts | Set `EngineConfig::install_root` for an app directory. |
-| Windows | bare `.exe`, `.msi` | Authenticode publisher | Call `UpdateEngine::remove_leftovers` at startup. Deltas are not supported. |
+| Windows | bare `.exe`, `.msi` | Authenticode publisher | Call `UpdateEngine::remove_leftovers` at startup. Deltas apply to bare `.exe` releases only; `.msi` releases take the full download. |
 
 The [`install`][install] guide has the details. The adapters need their GPUI
 backend's native toolchain, including Xcode and Metal on macOS; the core

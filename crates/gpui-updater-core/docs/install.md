@@ -10,6 +10,7 @@ root. The strategy depends on the platform:
 | Linux | `.tar.gz` | Extract it and atomically replace the executable. When the install root is a directory (an `app.app/` with `bin/` and `lib/`, as Zed ships), replace the whole directory. |
 | Linux | `.AppImage` | Replace the `.AppImage` file that the app runs from. |
 | Windows | bare `.exe` | Rename the running executable to `.old.exe` and put the new one in its place. |
+| Windows | `.exe` rebuilt from deltas | The same as a bare `.exe`. With the `delta` feature, the engine rebuilds it only when the install root and the release asset are both `.exe` files. |
 | Windows | `.msi` | Stage the package, and run msiexec after the app exits, through the restart path; the app then relaunches. |
 
 On Windows, msiexec runs with `/passive /norestart` by default; [`MsiUi`] in
