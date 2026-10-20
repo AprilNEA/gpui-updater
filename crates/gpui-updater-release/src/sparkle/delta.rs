@@ -296,9 +296,9 @@ mod tests {
         for l in locales {
             fs::create_dir_all(b.join("Resources").join(format!("{l}.lproj"))).unwrap();
         }
-        let framework = contents.join("Frameworks/Sparkle.framework");
         #[cfg(unix)]
         {
+            let framework = contents.join("Frameworks/Sparkle.framework");
             std::os::unix::fs::symlink("B", framework.join("Versions/Current")).unwrap();
             std::os::unix::fs::symlink("Versions/Current/Sparkle", framework.join("Sparkle"))
                 .unwrap();

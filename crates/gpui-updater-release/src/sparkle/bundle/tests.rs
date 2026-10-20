@@ -132,7 +132,7 @@ fn signs_inside_out_with_or_without_xpc_services() {
 }
 
 /// A minimal Sparkle release tree with the framework's version links.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn fake_distribution(root: &Path) -> SparkleDistribution {
     use std::os::unix::fs::symlink;
     let framework = root.join("Sparkle.framework");
