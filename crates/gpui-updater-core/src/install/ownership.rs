@@ -408,8 +408,18 @@ mod linux {
         None
     }
 
-    /// Run `program` with `LC_ALL=C` for at most two seconds, and return its
-    /// output when it succeeds. A missing program is `None`.
+    /// How long one package database query may take: two seconds.
+    ///
+    /// Tests allow 30 seconds. `dpkg-query --search` reads every package's
+    /// file list, and on a shared CI runner that also runs the other tests
+    /// in parallel, a cold query can take longer than two seconds. The
+    /// tests check what the query finds, not the time limit.
+    #[cfg(target_os = "linux")]
+    const QUERY_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(if cfg!(test) { 30 } else { 2 });
+
+    /// Run `program` with `LC_ALL=C` for at most [`QUERY_TIMEOUT`], and
+    /// return its output when it succeeds. A missing program is `None`.
     #[cfg(target_os = "linux")]
     fn run(program: &str, args: &[&std::ffi::OsStr]) -> Option<String> {
         use std::io::Read;
@@ -424,7 +434,7 @@ mod linux {
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + QUERY_TIMEOUT;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
