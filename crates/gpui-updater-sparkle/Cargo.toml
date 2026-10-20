@@ -15,7 +15,7 @@ keywords = ["gpui", "sparkle", "updater", "macos"]
 categories = ["gui", "os::macos-apis"]
 
 [dependencies]
-gpui-updater-core = { version = "0.4.2", path = "../gpui-updater-core" }
+gpui-updater-core = { version = "0.4.3", path = "../gpui-updater-core" }
 thiserror = "2"
 tracing = "0.1"
 
