@@ -7,6 +7,8 @@ mod delta_tests;
 #[cfg(feature = "delta")]
 mod hops;
 mod payload;
+#[cfg(all(test, feature = "delta", any(target_os = "macos", target_os = "linux")))]
+mod test_server;
 #[cfg(test)]
 mod tests;
 
