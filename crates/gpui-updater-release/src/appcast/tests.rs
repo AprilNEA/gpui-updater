@@ -187,7 +187,9 @@ fn the_core_source_reads_what_the_writer_writes() {
         .item(new)
         .item(old);
     let base = crate::test_server::serve(vec![("/appcast.xml".into(), feed.render().into_bytes())]);
+    // The enclosure is for macOS; select it on whichever host runs the test.
     let release = AppcastSource::new(format!("{base}/appcast.xml"))
+        .os("macos")
         .fetch_latest()
         .unwrap();
     assert_eq!(release.version, Version::new(1, 3, 0));

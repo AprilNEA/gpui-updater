@@ -108,7 +108,13 @@ fn signs_inside_out_with_or_without_xpc_services() {
     let names = |app: &Path| -> Vec<String> {
         code_inside_out(app)
             .iter()
-            .map(|p| p.strip_prefix(app).unwrap().display().to_string())
+            // `join` writes `\` on Windows; compare with `/` everywhere.
+            .map(|p| {
+                p.strip_prefix(app)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect()
     };
     let f = "Contents/Frameworks/Sparkle.framework";
