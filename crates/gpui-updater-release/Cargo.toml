@@ -24,7 +24,7 @@ clap = { version = "4.5", optional = true, features = ["derive", "env", "wrap_he
 # Signs Sparkle's `sparkle:edSignature`: plain Ed25519 over the file, from the
 # 32-byte seed that Sparkle's `generate_keys -x` exports.
 ed25519-compact = { version = "2.1", default-features = false, features = ["random"] }
-gpui-updater-core = { version = "0.4.1", path = "../gpui-updater-core" }
+gpui-updater-core = { version = "0.4.2", path = "../gpui-updater-core" }
 minisign = "0.7"
 plist = "1"
 semver = "1"
