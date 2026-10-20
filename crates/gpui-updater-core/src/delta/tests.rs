@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use semver::Version;
 
+use super::apply::windows_safe_name;
 use super::fsutil::{join_rel, mode_of, sha256_hex, walk};
 use super::macho::tests::signed;
 use super::{FORMAT, MAGIC, VersionPair, apply, create, read_info};
@@ -264,6 +265,60 @@ fn rejects_paths_that_escape_the_output() {
         let out = dir.path().join("out");
         assert!(
             matches!(apply(&delta, &base, &out), Err(Error::Delta(_))),
+            "{path}"
+        );
+        assert!(!out.exists());
+    }
+}
+
+#[test]
+fn knows_which_names_windows_stores_as_written() {
+    for name in [
+        "a:b",
+        "note.txt:stream",
+        "trail.",
+        "space ",
+        "...",
+        "CON",
+        "nul",
+        "Aux.txt",
+        "con .txt",
+        "com1",
+        "LPT9.log",
+        "COM\u{b9}",
+    ] {
+        assert!(!windows_safe_name(name), "{name}");
+    }
+    for name in [
+        "console.txt",
+        "conpty.dll",
+        "COM10.dll",
+        "LPT",
+        "nul-device",
+        ".config",
+        "a.b",
+    ] {
+        assert!(windows_safe_name(name), "{name}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn rejects_names_windows_would_read_differently() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base");
+    fs::create_dir(&base).unwrap();
+    for path in ["CON", "aux.txt", "note.txt:stream", "trail.", "space "] {
+        let delta = handcrafted(
+            dir.path(),
+            &serde_json::json!({
+                "format": FORMAT, "from": "1.0.0", "to": "1.1.0", "root": "dir",
+                "entries": [{"path": path, "kind": "dir", "mode": 0o755}]
+            }),
+        );
+        let out = dir.path().join("out");
+        assert!(
+            matches!(apply(&delta, &base, &out), Err(Error::Delta(ref m)) if m.contains("unsafe path")),
             "{path}"
         );
         assert!(!out.exists());
