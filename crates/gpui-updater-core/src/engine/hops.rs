@@ -8,14 +8,16 @@ use crate::cancel::CancelToken;
 use crate::delta::{self, Route};
 use crate::error::{Error, ErrorKind, Result};
 use crate::http::{self, Fetch};
+use crate::install;
 use crate::release::{DeltaAsset, Release};
 use crate::source::UpdateSource;
 use crate::staging::safe_file_name;
 
 impl<S: UpdateSource> UpdateEngine<S> {
     /// Try to rebuild the update from deltas. `None` means "use the full
-    /// download": there is no usable chain of deltas, or applying one failed
-    /// (logged).
+    /// download": the install cannot take a rebuilt update (on Windows, an
+    /// `.msi` release or an install root that is not an `.exe`), there is no
+    /// usable chain of deltas, or applying one failed (logged).
     pub(super) fn try_deltas(
         &self,
         release: &Release,
@@ -23,8 +25,19 @@ impl<S: UpdateSource> UpdateEngine<S> {
         cancel: &CancelToken,
         progress: &mut impl FnMut(u64, Option<u64>),
     ) -> Option<PathBuf> {
-        if !self.config.deltas || !cfg!(any(target_os = "macos", target_os = "linux")) {
+        if !self.config.deltas {
             return None;
+        }
+        // When the root cannot be found, `apply_chain` fails on it and logs why.
+        if let Ok(root) = self.install_root() {
+            if !install::accepts_rebuilt(&root, &release.asset.name) {
+                tracing::debug!(
+                    root = %root.display(),
+                    asset = %release.asset.name,
+                    "this install cannot take an update rebuilt from deltas"
+                );
+                return None;
+            }
         }
         let from = &self.config.current_version;
         let chain = self.plan(release)?;

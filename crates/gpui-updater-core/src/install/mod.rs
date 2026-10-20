@@ -87,15 +87,16 @@ impl InstallOptions {
 /// Install a downloaded update artifact over `install_root`.
 ///
 /// - `artifact`: the downloaded file (`.dmg` on macOS, `.tar.gz` or
-///   `.AppImage` on Linux, `.exe` or `.msi` on Windows). On macOS and Linux
-///   it may also be a directory holding an already-unpacked payload (the
-///   `.app` bundle or the executable), which is what
+///   `.AppImage` on Linux, `.exe` or `.msi` on Windows). It may also be a
+///   directory holding an already-unpacked payload, which is what
 ///   [`UpdateEngine::download`](crate::UpdateEngine::download) returns after
-///   rebuilding an update from a delta.
+///   rebuilding an update from a delta: the `.app` bundle on macOS, the
+///   executable or app directory on Linux, or on Windows the executable,
+///   under the install root's file name.
 /// - `install_root`: what to replace — on macOS the `.app` bundle directory;
 ///   on Linux the executable file, the `AppImage` file, or a directory that
-///   holds the whole app (replaced as a whole from the `.tar.gz`). Use
-///   [`current_install_root`] to derive it, or set
+///   holds the whole app (replaced as a whole from the `.tar.gz`); on
+///   Windows the executable. Use [`current_install_root`] to derive it, or set
 ///   [`EngineConfig::install_root`](crate::EngineConfig::install_root) to an
 ///   app directory.
 ///
@@ -149,6 +150,29 @@ pub fn remove_leftovers(install_root: &Path) {
     windows::remove_leftovers(install_root);
     #[cfg(not(target_os = "windows"))]
     let _ = install_root;
+}
+
+/// Whether an update rebuilt from deltas can replace `install_root`, for a
+/// release whose full artifact is named `artifact_name`. On macOS and Linux it
+/// always can. On Windows only a bare `.exe` can: the install root and the
+/// full artifact must both be `.exe` files. The files an `.msi` installed
+/// belong to Windows Installer, so those installs take the full download.
+#[cfg(feature = "delta")]
+pub(crate) fn accepts_rebuilt(install_root: &Path, artifact_name: &str) -> bool {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let _ = (install_root, artifact_name);
+        true
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::accepts_rebuilt(install_root, artifact_name)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (install_root, artifact_name);
+        false
+    }
 }
 
 /// Best-effort path of the currently installed application to replace.

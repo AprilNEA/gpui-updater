@@ -6,7 +6,8 @@
 //! way Sparkle does: the bundle must declare the release's version, and when
 //! the installed app is signed by a team, the update must be validly signed by
 //! that same team. On Windows the `.exe` or `.msi` must carry a valid
-//! Authenticode signature by the installed app's publisher.
+//! Authenticode signature by the installed app's publisher, and so must an
+//! executable rebuilt from deltas.
 
 use std::path::Path;
 
@@ -61,7 +62,9 @@ pub(super) fn check(artifact: &Path, expect: &Expectations<'_>) -> Result<()> {
     })
 }
 
-/// Check the Authenticode signature of `artifact`, an `.exe` or `.msi`.
+/// Check the Authenticode signature of `artifact`: an `.exe` or `.msi`, or a
+/// directory holding the executable rebuilt from deltas under the installed
+/// file's name.
 /// Bundle versions are not compared: Windows executables need not declare one.
 /// A signature that cannot be read is an error, not a pass, for the installed
 /// app as for the update: a check that turns itself off checks nothing.
@@ -74,10 +77,15 @@ pub(super) fn check(artifact: &Path, expect: &Expectations<'_>) -> Result<()> {
         CodeSigning::MatchInstalled => authenticode::query(expect.installed)?.valid_publisher(),
         _ => None,
     };
-    match publisher {
-        Some(publisher) => authenticode::query(artifact)?.require(&publisher),
-        None => Ok(()),
-    }
+    let Some(publisher) = publisher else {
+        return Ok(());
+    };
+    // A missing rebuilt file fails the query, so it cannot pass the check.
+    let signed = match expect.installed.file_name() {
+        Some(name) if artifact.is_dir() => artifact.join(name),
+        _ => artifact.to_path_buf(),
+    };
+    authenticode::query(&signed)?.require(&publisher)
 }
 
 /// Parse a bundle version leniently: an optional `v`, and missing minor or
@@ -554,5 +562,26 @@ mod windows_tests {
         // With nothing installed at the root, there is nothing to match.
         let unsigned = unsigned_file(dir.path());
         checked(&unsigned, &missing, &matching).unwrap();
+    }
+
+    #[test]
+    fn checks_the_executable_inside_a_rebuilt_directory() {
+        // A delta rebuilds the executable under the installed file's name.
+        let dir = tempfile::tempdir().unwrap();
+        let signed = signed_system_file();
+        let matching = CodeSigning::MatchInstalled;
+        let rebuilt = dir.path().join("delta-1.1.0");
+        std::fs::create_dir(&rebuilt).unwrap();
+        let exe = rebuilt.join(signed.file_name().unwrap());
+        // Nothing under that name: an error, not a pass.
+        assert!(checked(&rebuilt, &signed, &matching).is_err());
+        std::fs::write(&exe, b"MZ not really a program").unwrap();
+        assert!(matches!(
+            checked(&rebuilt, &signed, &matching),
+            Err(Error::Payload(_))
+        ));
+        // A copy keeps the catalog signature.
+        std::fs::copy(&signed, &exe).unwrap();
+        checked(&rebuilt, &signed, &matching).unwrap();
     }
 }

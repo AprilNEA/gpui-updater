@@ -195,6 +195,8 @@ fn validate(header: &Header, blob_section: u64) -> Result<()> {
 }
 
 /// A relative path made only of normal components (no `..`, `.`, or root).
+/// On Windows, each component must also be a name Windows stores as written
+/// (see [`windows_safe_name`]).
 fn check_rel(root: RootKind, rel: &str) -> Result<()> {
     if root == RootKind::File {
         return if rel.is_empty() {
@@ -210,12 +212,35 @@ fn check_rel(root: RootKind, rel: &str) -> Result<()> {
         && rel.split('/').all(|part| {
             let mut c = Path::new(part).components();
             matches!((c.next(), c.next()), (Some(Component::Normal(_)), None))
+                && (!cfg!(windows) || windows_safe_name(part))
         });
     if ok {
         Ok(())
     } else {
         Err(Error::Delta(format!("unsafe path `{rel}` in delta")))
     }
+}
+
+/// Whether Windows stores `name` as written. `a:b` names an alternate data
+/// stream of `a`, Win32 drops a trailing `.` or space (so `a.` is `a`), and
+/// `CON`, `NUL`, `COM1`, or `aux.txt` open a device instead of a file.
+pub(super) fn windows_safe_name(name: &str) -> bool {
+    if name.contains(':') || name.ends_with('.') || name.ends_with(' ') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let numbered = |prefix: &str| {
+        stem.get(..prefix.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+            && stem.get(prefix.len()..).is_some_and(|n| {
+                // A digit, or the superscript digits Windows also reserves.
+                matches!(n.as_bytes(), [b'0'..=b'9']) || matches!(n, "\u{b9}" | "\u{b2}" | "\u{b3}")
+            })
+    };
+    let device = ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|d| stem.eq_ignore_ascii_case(d));
+    !device && !numbered("COM") && !numbered("LPT")
 }
 
 /// A validated delta being written out over an installed base.

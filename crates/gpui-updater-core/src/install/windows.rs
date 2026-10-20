@@ -1,11 +1,17 @@
-//! Windows install strategies: the bare-`.exe` rename trick, or a staged MSI
-//! handoff.
+//! Windows install strategies: the bare-`.exe` rename trick (also for an
+//! executable rebuilt from deltas), or a staged MSI handoff.
 //!
 //! **Bare exe** (artifact ends `.exe`): Windows refuses to *delete* a running
 //! executable but allows *renaming* it. We move the current exe aside to
 //! `*.old.exe`, drop the freshly downloaded exe into place, and leave the
 //! stale copy for [`remove_leftovers`](super::remove_leftovers) to delete once
 //! the new version runs.
+//!
+//! **Rebuilt exe** (artifact is a directory): with the `delta` feature, the
+//! engine rebuilds the new executable from deltas into a directory, under the
+//! install root's file name. That file goes into place exactly like a
+//! downloaded bare exe. The engine only rebuilds when the install root and
+//! the release asset are both `.exe` files (see `accepts_rebuilt`).
 //!
 //! **MSI** (artifact ends `.msi`): running msiexec from inside the app would
 //! race ourselves — a well-authored per-user package closes the running app
@@ -24,7 +30,8 @@
 //! artifact is what we're about to execute or copy, so it must prove its own
 //! shape. (Dispatching on the root alone would let a mismatched payload — say
 //! an `.msi` served under an `exe` manifest format — be copied over the
-//! running binary byte-for-byte.)
+//! running binary byte-for-byte.) A directory artifact must hold a file with
+//! the install root's name, and only that file is installed.
 
 use std::fs;
 use std::path::Path;
@@ -37,6 +44,9 @@ pub(crate) fn install(
     install_root: &Path,
     options: &InstallOptions,
 ) -> Result<Installed> {
+    if artifact.is_dir() {
+        return install_rebuilt_exe(artifact, install_root);
+    }
     match artifact
         .extension()
         .and_then(|e| e.to_str())
@@ -81,6 +91,34 @@ fn install_bare_exe(new_exe: &Path, install_root: &Path) -> Result<Installed> {
     Ok(Installed {
         restart_path: Some(install_root.to_path_buf()),
     })
+}
+
+/// Install the executable that the engine rebuilt from deltas into `dir`,
+/// where it has the install root's file name.
+fn install_rebuilt_exe(dir: &Path, install_root: &Path) -> Result<Installed> {
+    let exe = install_root
+        .file_name()
+        .map(|name| dir.join(name))
+        .filter(|exe| fs::symlink_metadata(exe).is_ok_and(|m| m.is_file()))
+        .ok_or_else(|| {
+            Error::Install(format!(
+                "{} holds no rebuilt {}",
+                dir.display(),
+                install_root.display()
+            ))
+        })?;
+    install_bare_exe(&exe, install_root)
+}
+
+/// Whether an executable rebuilt from deltas may replace `install_root` when
+/// the release's full artifact is `artifact_name`: both must be `.exe` files.
+#[cfg(feature = "delta")]
+pub(crate) fn accepts_rebuilt(install_root: &Path, artifact_name: &str) -> bool {
+    let is_exe = |path: &Path| {
+        path.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    };
+    is_exe(install_root) && !install_root.is_dir() && is_exe(Path::new(artifact_name))
 }
 
 /// Stage a verified `.msi`: write the apply script next to it and hand that
@@ -196,6 +234,54 @@ mod tests {
         assert!(!root.with_extension("old.exe").exists());
         assert_eq!(fs::read(&root).unwrap(), b"new");
         super::super::remove_leftovers(&root);
+    }
+
+    #[test]
+    fn a_rebuilt_directory_installs_the_exe_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("App.exe");
+        let rebuilt = dir.path().join("delta-1.1.0");
+        fs::create_dir(&rebuilt).unwrap();
+        fs::write(&root, b"old").unwrap();
+        fs::write(rebuilt.join("App.exe"), b"new").unwrap();
+
+        let installed = install(&rebuilt, &root, &InstallOptions::new()).unwrap();
+
+        assert_eq!(installed.restart_path.as_deref(), Some(root.as_path()));
+        assert_eq!(fs::read(&root).unwrap(), b"new");
+        assert_eq!(fs::read(root.with_extension("old.exe")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn a_rebuilt_directory_without_the_exe_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("App.exe");
+        let rebuilt = dir.path().join("delta-1.1.0");
+        fs::create_dir_all(rebuilt.join("App.exe.d")).unwrap();
+        fs::write(&root, b"old").unwrap();
+        fs::write(rebuilt.join("Other.exe"), b"new").unwrap();
+
+        let err = install(&rebuilt, &root, &InstallOptions::new()).unwrap_err();
+
+        assert!(matches!(err, Error::Install(_)), "{err}");
+        assert_eq!(fs::read(&root).unwrap(), b"old");
+        assert!(!root.with_extension("old.exe").exists());
+    }
+
+    #[cfg(feature = "delta")]
+    #[test]
+    fn only_a_bare_exe_accepts_a_rebuilt_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("App.exe");
+        fs::write(&exe, b"app").unwrap();
+        assert!(accepts_rebuilt(&exe, "App-1.1.0-x64.exe"));
+        assert!(accepts_rebuilt(&exe, "APP.EXE"));
+        assert!(!accepts_rebuilt(&exe, "App-1.1.0-x64.msi"));
+        assert!(!accepts_rebuilt(&exe, "App-1.1.0-x64.zip"));
+        assert!(!accepts_rebuilt(dir.path(), "App.exe"));
+        let folder = dir.path().join("Folder.exe");
+        fs::create_dir(&folder).unwrap();
+        assert!(!accepts_rebuilt(&folder, "App.exe"));
     }
 
     #[test]

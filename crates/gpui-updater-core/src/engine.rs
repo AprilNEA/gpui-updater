@@ -7,8 +7,16 @@ mod delta_tests;
 #[cfg(feature = "delta")]
 mod hops;
 mod payload;
+#[cfg(all(
+    test,
+    feature = "delta",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod test_server;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "delta", target_os = "windows"))]
+mod windows_delta_tests;
 
 use std::path::{Path, PathBuf};
 
@@ -82,15 +90,19 @@ impl<S: UpdateSource> UpdateEngine<S> {
     /// must declare the release version and carry the expected code signature
     /// (see [`BundleVersion`] and [`CodeSigning`]).
     ///
-    /// With the `delta` feature (macOS and Linux), published deltas are tried
-    /// first: the cheapest chain from the current version, if it is smaller
-    /// than the full artifact. Each delta is downloaded, verified under the
-    /// same policies, and applied to the files it expects, which are checked
-    /// against the hashes recorded in the delta. The result is a directory
-    /// holding the rebuilt bundle or executable. If anything in that path
-    /// fails — no usable delta, a modified installation, a bad checksum or
-    /// signature, a network error — the full `release.asset` is downloaded
-    /// instead, so deltas can never make an update fail.
+    /// With the `delta` feature, published deltas are tried first: the
+    /// cheapest chain from the current version, if it is smaller than the
+    /// full artifact. On Windows this needs a bare `.exe` release: the
+    /// install root and the release asset must both be `.exe` files, so an
+    /// `.msi` release always takes the full download. Each delta is
+    /// downloaded, verified under the same policies, and applied to the files
+    /// it expects, which are checked against the hashes recorded in the
+    /// delta. The result is a directory holding the rebuilt bundle or
+    /// executable, which goes through the same payload checks as the full
+    /// artifact. If anything in that path fails — no usable delta, a modified
+    /// installation, a bad checksum or signature, a network error — the full
+    /// `release.asset` is downloaded instead, so deltas can never make an
+    /// update fail.
     ///
     /// `progress` is called as `(downloaded_bytes, total_bytes)`. After a failed
     /// delta attempt it restarts from zero for the full download.

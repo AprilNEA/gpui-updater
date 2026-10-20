@@ -11,8 +11,9 @@
 //! ```
 //!
 //! `<old>` and `<new>` are both `.app` bundle directories (macOS) or both
-//! executables (Linux) — the unpacked contents of two releases, not the `.dmg`
-//! or `.tar.gz` themselves. Publish each delta next to the new release as
+//! executables (Linux, or a bare `.exe` on Windows) — the unpacked contents of
+//! two releases, not the `.dmg` or `.tar.gz` themselves. Publish each delta
+//! next to the new release as
 //! `<asset>.from-<from-version>.delta` (GitHub Releases), or list it under the
 //! asset's `deltas` (static manifest), and sign it like any other artifact,
 //! naming the version it produces in the trusted comment so it cannot be
