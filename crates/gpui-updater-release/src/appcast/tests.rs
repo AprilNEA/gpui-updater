@@ -202,6 +202,7 @@ fn the_core_source_reads_what_the_writer_writes() {
     )
     .unwrap();
     let beta = AppcastSource::new(format!("{base}/appcast.xml"))
+        .os("macos")
         .channel("beta")
         .fetch_latest()
         .unwrap();
