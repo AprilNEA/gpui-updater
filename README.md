@@ -26,6 +26,7 @@ the platform artifact, verify it, and swap it into place.
 | Errors | Every failure carries an `ErrorKind`, so the app can choose what to tell the user. | [`ErrorKind`][errorkind] |
 | GPUI entity | An observable `Entity<Updater>` that runs the work on the background executor. There is no background polling: the app triggers each check. | [`gpui_updater`][adapter] |
 | Sparkle driver | Hands the whole macOS flow to Sparkle 2, behind the same entity and status. | [`gpui_updater_sparkle`][sparkle-docs] |
+| Release tooling | For release CI: writes `latest.json` and Sparkle appcasts with `<sparkle:deltas>`, signs with minisign and Sparkle Ed25519, embeds and signs `Sparkle.framework`, and makes verified Sparkle and native deltas. A library and a CLI. | [`gpui-updater-release`][release-docs] |
 
 ## Crates
 
@@ -35,6 +36,7 @@ the platform artifact, verify it, and swap it into place.
 | [`gpui-updater`][adapter] | Apps on registry `gpui` `^0.2.2` | 1.98 |
 | [`gpui-updater-pre`][adapter-pre] | Apps on `gpui-pre` `^0.3.4` | 1.98 |
 | [`gpui-updater-sparkle`][sparkle-docs] | Sparkle 2 on macOS, next to either adapter | 1.85 |
+| [`gpui-updater-release`][release-docs] | Release CI: feeds, signatures, Sparkle bundling, deltas; not an app dependency | 1.85 |
 
 The core and the two adapters are alternatives, not dependencies to combine;
 `gpui-updater-sparkle` is additive. Both adapters re-export the entire core
@@ -62,6 +64,12 @@ gpui-updater-sparkle = "0.4"
 
 Add `features = ["delta"]` to the core or adapter dependency for delta
 updates. Without the alias, pre imports use `gpui_updater_pre`.
+
+The release side is a separate tool for CI:
+
+```bash
+cargo install gpui-updater-release --features cli,delta --locked
+```
 
 ## Quick start
 
@@ -167,3 +175,4 @@ at your option.
 [adapter]: https://docs.rs/gpui-updater/latest/gpui_updater/
 [adapter-pre]: https://docs.rs/gpui-updater-pre/latest/gpui_updater_pre/
 [sparkle-docs]: https://docs.rs/gpui-updater-sparkle/latest/gpui_updater_sparkle/
+[release-docs]: https://github.com/AprilNEA/gpui-updater/tree/master/crates/gpui-updater-release

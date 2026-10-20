@@ -114,7 +114,11 @@ and `cargo test` never need the framework and no rpath is required. To ship:
    services, `Autoupdate`, `Updater.app`, then the framework, then the app.
    Avoid `codesign --deep`. Then notarize.
 5. Publish each release with `generate_appcast` (or `sign_update`), which
-   writes `sparkle:edSignature` for every archive.
+   writes `sparkle:edSignature` for every archive. Without Xcode, use
+   [`gpui-updater-release`](../gpui-updater-release/README.md): `sparkle embed`,
+   `sparkle codesign`, and `sparkle verify` do steps 1 to 4; `sparkle delta`
+   makes verified Sparkle deltas; and `appcast` writes the signed feed with
+   `<sparkle:deltas>`.
 
 The same appcast also feeds `gpui_updater_core::AppcastSource` on other platforms
 and in unbundled runs; configure that engine with the same `SUPublicEDKey`

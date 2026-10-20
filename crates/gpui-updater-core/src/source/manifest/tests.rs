@@ -8,19 +8,13 @@ fn pats(p: &[&str]) -> Vec<String> {
 
 #[test]
 fn asset_matching_requires_all_substrings_case_insensitively() {
-    let asset = ManifestAsset {
-        name: "OpenLogi-v0.2.1-macOS-arm64.DMG".to_string(),
-        url: "https://dl.example.com/app.dmg".to_string(),
-        size: None,
-        sha256: None,
-        signature: None,
-        signature_url: None,
-        ed25519_signature: None,
-        os: Some("macos".to_string()),
-        arch: Some("arm64".to_string()),
-        format: Some("dmg".to_string()),
-        deltas: Vec::new(),
-    };
+    let mut asset = ManifestAsset::new(
+        "OpenLogi-v0.2.1-macOS-arm64.DMG",
+        "https://dl.example.com/app.dmg",
+    );
+    asset.os = Some("macos".to_string());
+    asset.arch = Some("arm64".to_string());
+    asset.format = Some("dmg".to_string());
     assert!(asset_matches(
         &asset,
         AssetSelector {
@@ -66,7 +60,7 @@ fn deserializes_manifest_with_flat_assets_and_unknown_fields() {
         ]
     }"#;
     let manifest: Manifest = serde_json::from_str(json).unwrap();
-    manifest.validate_schema_version().unwrap();
+    validate_schema_version(&manifest).unwrap();
     assert_eq!(parse_tag(&manifest.version).unwrap().to_string(), "0.2.1");
     let picked = select_asset(
         &manifest.assets,
@@ -146,17 +140,34 @@ fn maps_asset_deltas_and_skips_invalid_ones() {
 
 #[test]
 fn rejects_unknown_schema_version() {
-    let manifest = Manifest {
-        schema_version: Some(2),
-        version: "1.0.0".to_string(),
-        notes: None,
-        notes_url: None,
-        published_at: None,
-        release_url: None,
-        expires: None,
-        assets: Vec::new(),
-    };
-    assert!(manifest.validate_schema_version().is_err());
+    let mut manifest = Manifest::new("1.0.0");
+    manifest.schema_version = Some(2);
+    assert!(validate_schema_version(&manifest).is_err());
+}
+
+#[test]
+fn round_trips_unknown_fields_and_skips_empty_ones() {
+    let json = r#"{"version":"1.0.0","x_build":7,"assets":[{"name":"a.dmg","url":"https://e/a.dmg","x_note":"n","deltas":[{"from":"0.9.0","url":"https://e/d","x_d":true}]}]}"#;
+    let manifest: Manifest = serde_json::from_str(json).unwrap();
+    assert_eq!(manifest.extra["x_build"], 7);
+    assert_eq!(manifest.assets[0].extra["x_note"], "n");
+    assert_eq!(manifest.assets[0].deltas[0].extra["x_d"], true);
+    let out = serde_json::to_value(&manifest).unwrap();
+    assert_eq!(
+        out,
+        serde_json::from_str::<serde_json::Value>(json).unwrap()
+    );
+}
+
+#[test]
+fn descriptive_fields_of_the_wrong_type_read_as_absent() {
+    // Before these fields had a type they were ignored, so a non-string value
+    // must not fail the whole manifest.
+    let json = r#"{"version":"1.0.0","channel":3,"app_id":null,"assets":[{"name":"a","url":"https://e/a","minimum_os_version":13.0}]}"#;
+    let manifest: Manifest = serde_json::from_str(json).unwrap();
+    assert_eq!(manifest.channel, None);
+    assert_eq!(manifest.app_id, None);
+    assert_eq!(manifest.assets[0].minimum_os_version, None);
 }
 
 /// Serve `files` (path, body) over HTTP until the test process exits.

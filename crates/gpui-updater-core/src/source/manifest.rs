@@ -11,11 +11,11 @@
 use std::time::SystemTime;
 
 use semver::Version;
-use serde::Deserialize;
 
 use super::{UpdateSource, dates, trust};
 use crate::error::{Error, Result};
 use crate::http::{self, HttpOptions};
+use crate::manifest::{Manifest, ManifestAsset, ManifestDelta, SCHEMA_VERSION};
 use crate::release::{
     Asset, DELTA_FORMAT_FILES_BSDIFF_V1, DeltaAsset, Release, parse_tag, web_page_url,
 };
@@ -174,7 +174,7 @@ impl StaticManifestSource {
 impl UpdateSource for StaticManifestSource {
     fn fetch_latest(&self) -> Result<Release> {
         let manifest = self.fetch_manifest()?;
-        manifest.validate_schema_version()?;
+        validate_schema_version(&manifest)?;
         if let Some(expires) = manifest.expires.as_deref().filter(|s| !s.trim().is_empty()) {
             trust::check_expiry(expires, SystemTime::now())?;
         }
@@ -318,85 +318,14 @@ fn select_asset<'a>(
     assets.iter().find(|a| asset_matches(a, selector))
 }
 
-#[derive(Debug, Deserialize)]
-struct Manifest {
-    #[serde(default)]
-    schema_version: Option<u32>,
-    version: String,
-    #[serde(default)]
-    notes: Option<String>,
-    #[serde(default)]
-    notes_url: Option<String>,
-    /// RFC 3339 time the release was published.
-    #[serde(default)]
-    published_at: Option<String>,
-    /// A web page about the release.
-    #[serde(default)]
-    release_url: Option<String>,
-    /// RFC 3339 time after which the manifest must not be trusted.
-    #[serde(default)]
-    expires: Option<String>,
-    #[serde(default)]
-    assets: Vec<ManifestAsset>,
-}
-
-impl Manifest {
-    fn validate_schema_version(&self) -> Result<()> {
-        match self.schema_version.unwrap_or(1) {
-            1 => Ok(()),
-            other => Err(Error::Parse(format!(
-                "unsupported static manifest schema_version `{other}`"
-            ))),
-        }
+/// Reject a schema version this crate does not understand.
+fn validate_schema_version(manifest: &Manifest) -> Result<()> {
+    match manifest.schema_version.unwrap_or(SCHEMA_VERSION) {
+        SCHEMA_VERSION => Ok(()),
+        other => Err(Error::Parse(format!(
+            "unsupported static manifest schema_version `{other}`"
+        ))),
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestAsset {
-    name: String,
-    url: String,
-    #[serde(default)]
-    size: Option<u64>,
-    #[serde(default)]
-    sha256: Option<String>,
-    #[serde(default)]
-    signature: Option<String>,
-    #[serde(default)]
-    signature_url: Option<String>,
-    #[serde(default)]
-    ed25519_signature: Option<String>,
-    #[serde(default)]
-    os: Option<String>,
-    #[serde(default)]
-    arch: Option<String>,
-    #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    deltas: Vec<ManifestDelta>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestDelta {
-    from: String,
-    /// Defaults to the manifest's `version`; set it to list deltas between
-    /// older releases, which the engine can chain.
-    #[serde(default)]
-    to: Option<String>,
-    url: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    size: Option<u64>,
-    #[serde(default)]
-    sha256: Option<String>,
-    #[serde(default)]
-    signature: Option<String>,
-    #[serde(default)]
-    signature_url: Option<String>,
-    #[serde(default)]
-    ed25519_signature: Option<String>,
 }
 
 #[cfg(test)]

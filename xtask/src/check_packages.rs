@@ -16,11 +16,12 @@ use std::process::{Command, Stdio};
 use anyhow::{Context as _, Result, bail, ensure};
 
 /// Every published crate. Each is packaged, extracted, checked, and consumed.
-const PUBLISHED: [&str; 4] = [
+const PUBLISHED: [&str; 5] = [
     "gpui-updater-core",
     "gpui-updater",
     "gpui-updater-pre",
     "gpui-updater-sparkle",
+    "gpui-updater-release",
 ];
 
 /// Files every published archive must carry.
@@ -262,9 +263,21 @@ fn main() {
     let _driver = SparkleDriver::load(SparkleOptions::new());
 }
 ";
+    const RELEASE: &str = r#"use updater::{AppcastItem, Classifier, FeedLayout, ManifestBuilder, SparkleKey};
+
+// The release tooling is a library first; the CLI is behind `cli`.
+fn main() {
+    let layout = FeedLayout::new("https://example.invalid", "stable");
+    assert_eq!(layout.manifest_url(), "https://example.invalid/channels/stable/latest.json");
+    let _builder = ManifestBuilder::for_layout(&layout, "v1.2.3").classifier(Classifier::default());
+    let _key = SparkleKey::generate();
+    let _ = std::any::type_name::<AppcastItem>();
+}
+"#;
     match package {
         "gpui-updater" | "gpui-updater-pre" => format!("{ENGINE}{ADAPTER}"),
         "gpui-updater-sparkle" => SPARKLE.to_owned(),
+        "gpui-updater-release" => RELEASE.to_owned(),
         _ => ENGINE.to_owned(),
     }
 }
@@ -287,7 +300,7 @@ fn needs_libc_hold(lock: &str) -> Result<bool> {
 }
 
 /// The selected normal/build closure must match the package's GPUI identity:
-/// core and Sparkle pull in no GPUI, official pulls in no pre, pre no official.
+/// core, Sparkle, and the release tooling pull in no GPUI, official pulls in no pre, pre no official.
 /// Package locks may list unrelated platform/optional dependencies; only the
 /// `cargo tree` closure is evidence of what is compiled.
 fn check_closure(package: &str, names: &BTreeSet<&str>) -> Result<()> {
@@ -306,7 +319,7 @@ fn check_closure(package: &str, names: &BTreeSet<&str>) -> Result<()> {
             .collect()
     };
     let (required, unexpected): (&[&str], Vec<String>) = match package {
-        "gpui-updater-core" | "gpui-updater-sparkle" => (
+        "gpui-updater-core" | "gpui-updater-sparkle" | "gpui-updater-release" => (
             &["gpui-updater-core"],
             matching(&|name| {
                 name.starts_with("gpui") && name != "gpui-updater-core" && name != package
@@ -449,6 +462,15 @@ mod tests {
             .is_err()
         );
 
+        let release = names(&["gpui-updater-release", "gpui-updater-core", "minisign"]);
+        check_closure("gpui-updater-release", &release).unwrap();
+        assert!(
+            check_closure(
+                "gpui-updater-release",
+                &names(&["gpui-updater-release", "gpui-updater-core", "gpui"])
+            )
+            .is_err()
+        );
         let sparkle = names(&["gpui-updater-sparkle", "gpui-updater-core", "objc2"]);
         check_closure("gpui-updater-sparkle", &sparkle).unwrap();
         assert!(
