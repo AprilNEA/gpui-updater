@@ -174,6 +174,9 @@ pub fn delta_file_name(archive: &str, from_bundle_version: &str) -> String {
 }
 
 /// Make a delta from `old_app` to `new_app` at `out` with `BinaryDelta`.
+///
+/// When `BinaryDelta` or the verification fails, `out` is removed, so a
+/// directory that is uploaded afterwards holds only deltas that work.
 pub fn create(
     dist: &SparkleDistribution,
     old_app: &Path,
@@ -201,9 +204,17 @@ pub fn create(
     if options.verbose {
         cmd.arg("--verbose");
     }
-    run(cmd.arg(old_app).arg(new_app).arg(out))?;
+    if let Err(e) = run(cmd.arg(old_app).arg(new_app).arg(out)) {
+        let _ = fs::remove_file(out);
+        return Err(e);
+    }
     if options.verify {
-        verify(dist, old_app, new_app, out)?;
+        if let Err(e) = verify(dist, old_app, new_app, out) {
+            // Never leave a delta that does not rebuild the new app where a
+            // later upload step would pick it up.
+            let _ = fs::remove_file(out);
+            return Err(e);
+        }
     }
     Ok(SparkleDelta {
         path: out.to_path_buf(),
@@ -366,6 +377,50 @@ mod tests {
 
         fs::write(&path, b"changed!").unwrap();
         assert!(SparkleDelta::read_metadata(&path).is_err());
+    }
+
+    /// A fake `BinaryDelta`: `create` writes the delta, `apply` rebuilds an
+    /// app whose version differs from the new one.
+    #[cfg(unix)]
+    fn wrong_tool(root: &Path) -> SparkleDistribution {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::create_dir_all(root.join("Sparkle.framework")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let tool = root.join("bin/BinaryDelta");
+        fs::write(
+            &tool,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             create) echo delta > \"$4\" ;;\n\
+             apply) mkdir -p \"$3/Contents\" && cp \"$2/Contents/Info.plist\" \"$3/Contents/\" ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        SparkleDistribution::from_dir(root).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delta_that_fails_verification_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dist = wrong_tool(&dir.path().join("sparkle"));
+        let old = dir.path().join("Old.app");
+        let new = dir.path().join("New.app");
+        app(&old, "0.8.14", &[]);
+        app(&new, "0.8.15", &[]);
+        let out = dir.path().join("out/App.dmg.from-0.8.14.sparkle-delta");
+        create(&dist, &old, &new, &out, &DeltaOptions::default()).unwrap_err();
+        assert!(!out.exists(), "an unverified delta was left behind");
+
+        let unchecked = DeltaOptions {
+            verify: false,
+            ..DeltaOptions::default()
+        };
+        let delta = create(&dist, &old, &new, &out, &unchecked).unwrap();
+        assert_eq!(delta.from.bundle_version, "0.8.14");
+        assert_eq!(delta.to_bundle_version, "0.8.15");
+        assert!(out.is_file());
     }
 
     #[test]
