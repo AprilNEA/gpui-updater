@@ -82,7 +82,8 @@ impl Appcast {
         self
     }
 
-    /// The feed as XML.
+    /// The feed as XML. This does not [`validate`](Self::validate) the feed;
+    /// [`write`](Self::write) does.
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
@@ -106,8 +107,21 @@ impl Appcast {
         out
     }
 
-    /// Write the feed, creating parent directories.
+    /// Fail on what Sparkle would read without error but never use: a delta
+    /// whose URL does not end in `.delta` (see [`ensure_sparkle_delta_url`]).
+    pub fn validate(&self) -> Result<()> {
+        for item in &self.items {
+            for delta in &item.deltas {
+                ensure_sparkle_delta_url(&delta.url)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Validate`](Self::validate) and write the feed, creating parent
+    /// directories.
     pub fn write(&self, path: &Path) -> Result<()> {
+        self.validate()?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent).map_err(Error::io("create", parent))?;
         }
@@ -598,13 +612,16 @@ impl DeltaEnclosure {
         }
     }
 
-    /// A delta file on disk, signed with `key` when given.
+    /// A delta file on disk, signed with `key` when given. `url` must pass
+    /// [`ensure_sparkle_delta_url`].
     pub fn for_file(
         path: &Path,
         url: impl Into<String>,
         delta_from: impl Into<String>,
         key: Option<&SparkleKey>,
     ) -> Result<Self> {
+        let url = url.into();
+        ensure_sparkle_delta_url(&url)?;
         let length = fs::metadata(path).map_err(Error::io("stat", path))?.len();
         let mut delta = Self::new(url, delta_from, length);
         delta.ed_signature = key.map(|key| key.sign_file(path)).transpose()?;
@@ -637,6 +654,31 @@ impl DeltaEnclosure {
         );
         attribute(out, "sparkle:edSignature", self.ed_signature.as_ref());
         out.push_str("/>\n");
+    }
+}
+
+/// Fail unless Sparkle would apply the download at `url` as a delta.
+///
+/// Sparkle saves a download under the name the server suggests, which is the
+/// last segment of the URL path unless the response sets
+/// `Content-Disposition`. Its installer then picks an unarchiver by that
+/// name's extension and applies a delta only when it is exactly `delta`
+/// (`SUBinaryDeltaUnarchiver`, case-sensitive). Under any other name the
+/// install fails with "No valid unarchiver", and the client downloads the full
+/// update after the delta. This checks the URL path, ignoring any query or
+/// fragment; it cannot see a `Content-Disposition` header.
+// Sparkle compares the extension with `isEqualToString:@"delta"`, so `.DELTA`
+// really fails on the client.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+pub fn ensure_sparkle_delta_url(url: &str) -> Result<()> {
+    let path = url.split(['?', '#']).next().unwrap_or_default();
+    let name = path.rsplit('/').next().unwrap_or_default();
+    if name.len() > ".delta".len() && name.ends_with(".delta") {
+        Ok(())
+    } else {
+        Err(Error::invalid(format!(
+            "Sparkle would not apply the delta at `{url}`: its file name must end in `.delta`"
+        )))
     }
 }
 

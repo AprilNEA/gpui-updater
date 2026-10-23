@@ -208,3 +208,57 @@ fn the_core_source_reads_what_the_writer_writes() {
         .unwrap();
     assert_eq!(beta.version, Version::new(2, 0, 0));
 }
+
+#[test]
+fn sparkle_applies_only_delta_urls_ending_in_dot_delta() {
+    for ok in [
+        "https://e/r/App.dmg.from-0.8.16.sparkle.delta",
+        "https://e/r/App.delta?sig=1",
+        "https://e/r/App.delta#x",
+    ] {
+        ensure_sparkle_delta_url(ok).unwrap();
+    }
+    for bad in [
+        // What gpui-updater-release 0.4.3 wrote; Sparkle 2.10 logs
+        // "No valid unarchiver" and downloads the full update.
+        "https://e/r/App.dmg.from-0.8.16.sparkle-delta",
+        "https://e/r/App.DELTA",
+        "https://e/r/.delta",
+        "https://e/r/App.dmg?name=x.delta",
+        "https://e/r/delta",
+    ] {
+        assert!(ensure_sparkle_delta_url(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn write_refuses_a_delta_sparkle_would_not_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let item = AppcastItem::new(
+        "0.8.17",
+        Enclosure::new("https://e/r/App.dmg", 10, "application/x-apple-diskimage"),
+    )
+    .delta(DeltaEnclosure::new(
+        "https://e/r/App.dmg.from-0.8.16.sparkle-delta",
+        "0.8.16",
+        5,
+    ));
+    let feed = Appcast::new("App", "https://e/appcast.xml").item(item);
+    assert!(feed.render().contains("sparkle-delta"));
+    let out = dir.path().join("appcast.xml");
+    let err = feed.write(&out).unwrap_err().to_string();
+    assert!(err.contains("must end in `.delta`"), "{err}");
+    assert!(!out.exists());
+
+    let delta = dir.path().join("App.dmg.from-0.8.16.sparkle-delta");
+    fs::write(&delta, b"d").unwrap();
+    assert!(
+        DeltaEnclosure::for_file(
+            &delta,
+            "https://e/r/App.dmg.from-0.8.16.sparkle-delta",
+            "0.8.16",
+            None
+        )
+        .is_err()
+    );
+}

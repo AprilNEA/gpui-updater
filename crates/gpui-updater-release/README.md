@@ -65,7 +65,7 @@ an option.
 | Asset names | `<app>-v<version>-<os>-<arch>.<format>` | `Classifier` rules, `--arch` |
 | minisign signature | `<file>.minisig` next to the file | — |
 | Native delta | `<asset>.from-<version>.delta` | `native_delta::delta_path` |
-| Sparkle delta | `<archive>.from-<CFBundleVersion>.sparkle-delta` | `--out <file>` |
+| Sparkle delta | `<archive>.from-<CFBundleVersion>.sparkle.delta` | `--out <file>` (must end in `.delta`) |
 | Sparkle delta metadata | `<delta>.json` next to the delta | — |
 | Sparkle release | 2.10.0, SHA-256 pinned | `--sparkle-version` and `--sparkle-sha256`, `--sparkle-url` |
 
@@ -176,10 +176,21 @@ gpui-updater-release manifest --tag v1.2.3 --dist dist --out feeds/latest.json \
 ```
 
 `appcast` writes one feed per architecture, signs every enclosure and delta
-with the Sparkle key, and attaches the `.sparkle-delta` files whose name
+with the Sparkle key, and attaches the `.sparkle.delta` files whose name
 matches the archive. It fails when a delta does not produce this release's
-`CFBundleVersion`, and when `sparkle:version` is not one Sparkle orders
-correctly (`--version-parts 3` by default; `--any-version` skips the check).
+`CFBundleVersion`, when `sparkle:version` is not one Sparkle orders
+correctly (`--version-parts 3` by default; `--any-version` skips the check),
+and when a delta URL does not end in `.delta`.
+
+Sparkle saves a download under the last segment of its URL and applies it
+as a delta only when that name ends in `.delta`. Any other name fails with
+"No valid unarchiver", and the client downloads the full update after the
+delta, so the delta saves nothing. `Appcast::write` and
+`DeltaEnclosure::for_file` refuse such a URL (`ensure_sparkle_delta_url`).
+gpui-updater-release 0.4.3 and earlier named deltas `.sparkle-delta`;
+`appcast` now refuses those files instead of attaching them, so make them
+again with 0.4.4 or rename each delta and its `.json` to end in
+`.sparkle.delta`.
 
 `manifest` lists every classified file, attaches native deltas to their asset
 newest first, and adds `sha256`. It fails when a file has no `.minisig`

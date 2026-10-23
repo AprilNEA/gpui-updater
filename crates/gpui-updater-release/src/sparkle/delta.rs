@@ -7,6 +7,15 @@
 //! uses to skip a delta that cannot apply (`deltaFromSparkleExecutableSize`,
 //! `deltaFromSparkleLocales`). `BinaryDelta` runs on macOS only; signing and
 //! writing the appcast run anywhere.
+//!
+//! Sparkle's installer applies a download as a delta only when the saved
+//! file's extension is exactly `delta` (`SUBinaryDeltaUnarchiver`), and it
+//! saves the download under the name the server suggests: the last segment
+//! of the URL path, unless the response sets `Content-Disposition`. Any
+//! other name fails with "No valid unarchiver", and the client falls back to
+//! the full download. [`delta_file_name`] therefore ends in
+//! [`FILE_SUFFIX`], and [`create`] refuses an output name Sparkle would not
+//! apply.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +33,15 @@ use crate::util::{file_name, run};
 
 /// `generate_appcast` records at most this many locales.
 pub const MAX_LOCALES: usize = 7;
+
+/// The end of every name [`delta_file_name`] gives. Sparkle sees the
+/// extension `delta`; the `.sparkle` before it keeps these files apart from
+/// native `<asset>.from-<version>.delta` files in the same directory.
+pub const FILE_SUFFIX: &str = ".sparkle.delta";
+
+/// The suffix gpui-updater-release 0.4.3 and earlier used. Sparkle never
+/// applies such a file; [`find_deltas`] reports one instead of attaching it.
+const LEGACY_FILE_SUFFIX: &str = ".sparkle-delta";
 
 /// What a delta needs to know about the app it applies to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,16 +185,66 @@ impl SparkleDelta {
 }
 
 /// The conventional Sparkle delta file name:
-/// `<archive>.from-<bundle version>.sparkle-delta`. The extension keeps it
-/// apart from native `.delta` files in the same release directory.
+/// `<archive>.from-<bundle version>.sparkle.delta` (see [`FILE_SUFFIX`]).
 pub fn delta_file_name(archive: &str, from_bundle_version: &str) -> String {
-    format!("{archive}.from-{from_bundle_version}.sparkle-delta")
+    format!("{archive}.from-{from_bundle_version}{FILE_SUFFIX}")
+}
+
+/// Whether `path` is named like a [`delta_file_name`].
+pub fn is_delta_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.len() > FILE_SUFFIX.len() && name.ends_with(FILE_SUFFIX))
+}
+
+/// The Sparkle deltas in `dir` (not recursive), each read with
+/// [`SparkleDelta::read_metadata`], sorted by path.
+///
+/// Fails on a file with the `.sparkle-delta` suffix of gpui-updater-release
+/// 0.4.3 and earlier: Sparkle never applies it, so attaching it to an
+/// appcast would only make every client download it before the full update.
+pub fn find_deltas(dir: &Path) -> Result<Vec<SparkleDelta>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).map_err(Error::io("read directory", dir))? {
+        let path = entry.map_err(Error::io("read directory", dir))?.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name.ends_with(LEGACY_FILE_SUFFIX) {
+            return Err(Error::invalid(format!(
+                "`{}` ends in `{LEGACY_FILE_SUFFIX}`, which Sparkle never applies as a delta; \
+                 make it again, or rename it to end in `{FILE_SUFFIX}` along with its `.json`",
+                path.display()
+            )));
+        }
+        if is_delta_file(&path) {
+            out.push(SparkleDelta::read_metadata(&path)?);
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+/// Fail unless Sparkle would apply a download saved as `path`.
+fn ensure_delta_name(path: &Path) -> Result<()> {
+    if path.extension().is_some_and(|e| e == "delta") {
+        Ok(())
+    } else {
+        Err(Error::invalid(format!(
+            "`{}` must end in `.delta`: Sparkle applies a delta only under that extension \
+             (use `delta_file_name`)",
+            path.display()
+        )))
+    }
 }
 
 /// Make a delta from `old_app` to `new_app` at `out` with `BinaryDelta`.
 ///
-/// When `BinaryDelta` or the verification fails, `out` is removed, so a
-/// directory that is uploaded afterwards holds only deltas that work.
+/// `out` must end in `.delta`, the only extension Sparkle applies as a
+/// delta; [`delta_file_name`] gives such a name. When `BinaryDelta` or the
+/// verification fails, `out` is removed, so a directory that is uploaded
+/// afterwards holds only deltas that work.
 pub fn create(
     dist: &SparkleDistribution,
     old_app: &Path,
@@ -184,6 +252,7 @@ pub fn create(
     out: &Path,
     options: &DeltaOptions,
 ) -> Result<SparkleDelta> {
+    ensure_delta_name(out)?;
     let tool = tool(dist)?;
     let from = inspect(old_app)?;
     let to = inspect(new_app)?;
@@ -346,8 +415,11 @@ mod tests {
         let path = dir.path().join(delta_file_name("App.dmg", "0.8.14"));
         assert!(
             path.to_string_lossy()
-                .ends_with("App.dmg.from-0.8.14.sparkle-delta")
+                .ends_with("App.dmg.from-0.8.14.sparkle.delta")
         );
+        // What Sparkle's `SUBinaryDeltaUnarchiver` checks.
+        assert_eq!(path.extension().unwrap(), "delta");
+        assert!(is_delta_file(&path));
         fs::write(&path, b"delta").unwrap();
         let delta = SparkleDelta {
             path: path.clone(),
@@ -370,7 +442,10 @@ mod tests {
         assert_eq!(SparkleDelta::read_metadata(&path).unwrap(), delta);
 
         let key = SparkleKey::generate();
-        let enclosure = delta.enclosure("https://e/d", Some(&key)).unwrap();
+        assert!(delta.enclosure("https://e/d", Some(&key)).is_err());
+        let enclosure = delta
+            .enclosure("https://e/App.dmg.from-0.8.14.sparkle.delta", Some(&key))
+            .unwrap();
         assert_eq!(enclosure.delta_from, "0.8.14");
         assert_eq!(enclosure.sparkle_executable_size, Some(976_240));
         assert!(enclosure.ed_signature.is_some());
@@ -409,7 +484,7 @@ mod tests {
         let new = dir.path().join("New.app");
         app(&old, "0.8.14", &[]);
         app(&new, "0.8.15", &[]);
-        let out = dir.path().join("out/App.dmg.from-0.8.14.sparkle-delta");
+        let out = dir.path().join("out/App.dmg.from-0.8.14.sparkle.delta");
         create(&dist, &old, &new, &out, &DeltaOptions::default()).unwrap_err();
         assert!(!out.exists(), "an unverified delta was left behind");
 
@@ -430,5 +505,81 @@ mod tests {
         let dist = SparkleDistribution::from_dir(dir.path()).unwrap();
         let err = verify(&dist, dir.path(), dir.path(), dir.path()).unwrap_err();
         assert!(err.to_string().contains("BinaryDelta"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_name_sparkle_would_not_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let dist = wrong_tool(&dir.path().join("sparkle"));
+        let old = dir.path().join("Old.app");
+        let new = dir.path().join("New.app");
+        app(&old, "0.8.14", &[]);
+        app(&new, "0.8.15", &[]);
+        let unchecked = DeltaOptions {
+            verify: false,
+            ..DeltaOptions::default()
+        };
+        for name in [
+            "App.dmg.from-0.8.14.sparkle-delta",
+            "App.DELTA",
+            "App.delta.zip",
+        ] {
+            let out = dir.path().join(name);
+            let err = create(&dist, &old, &new, &out, &unchecked).unwrap_err();
+            assert!(
+                err.to_string().contains("must end in `.delta`"),
+                "{name}: {err}"
+            );
+            assert!(!out.exists(), "{name} was written");
+        }
+    }
+
+    fn stored_delta(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"delta").unwrap();
+        SparkleDelta {
+            path: path.clone(),
+            length: 5,
+            from: OldApp {
+                bundle_version: "0.8.14".into(),
+                short_version: None,
+                sparkle_executable_size: None,
+                sparkle_locales: None,
+            },
+            to_bundle_version: "0.8.15".into(),
+            format_version: None,
+        }
+        .write_metadata()
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn find_deltas_reads_sparkle_deltas_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = stored_delta(dir.path(), &delta_file_name("App-arm64.dmg", "0.8.15"));
+        let a = stored_delta(dir.path(), &delta_file_name("App-arm64.dmg", "0.8.14"));
+        // A native delta, the full archive, and a bare suffix stay out.
+        fs::write(dir.path().join("App-arm64.dmg.from-0.8.14.delta"), b"n").unwrap();
+        fs::write(dir.path().join("App-arm64.dmg"), b"full").unwrap();
+        fs::write(dir.path().join(FILE_SUFFIX), b"?").unwrap();
+        let found: Vec<_> = find_deltas(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|d| d.path)
+            .collect();
+        assert_eq!(found, [a, b]);
+    }
+
+    #[test]
+    fn find_deltas_rejects_the_old_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        stored_delta(dir.path(), "App.dmg.from-0.8.14.sparkle-delta");
+        let err = find_deltas(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("never applies") && err.contains(FILE_SUFFIX),
+            "{err}"
+        );
     }
 }

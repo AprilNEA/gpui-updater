@@ -44,7 +44,7 @@ pub struct ReadmeDoctests;
 
 pub use appcast::{
     Appcast, AppcastItem, Critical, DeltaEnclosure, Enclosure, Informational, ReleaseNotes,
-    ensure_sparkle_version,
+    ensure_sparkle_delta_url, ensure_sparkle_version,
 };
 pub use artifact::{ArchRule, ArtifactRule, Classified, Classifier};
 pub use error::{Error, Result};

@@ -110,9 +110,13 @@ impl DeltaFile {
     }
 
     /// Recognize `<asset>.from-<version>.delta`, the name
-    /// [`delta_file_name`] gives.
+    /// [`delta_file_name`] gives. A Sparkle delta
+    /// ([`crate::sparkle::delta::FILE_SUFFIX`]) is not one.
     pub fn from_path(path: &Path) -> Option<Self> {
         let name = path.file_name()?.to_str()?;
+        if name.ends_with(crate::sparkle::delta::FILE_SUFFIX) {
+            return None;
+        }
         let stem = name.strip_suffix(".delta")?;
         let (asset, from) = stem.rsplit_once(".from-")?;
         if asset.is_empty() || from.is_empty() {
@@ -120,6 +124,12 @@ impl DeltaFile {
         }
         Some(Self::new(asset, from, path))
     }
+}
+
+fn is_sparkle_delta_or_metadata(path: &Path) -> bool {
+    crate::sparkle::delta::is_delta_file(path)
+        || (path.extension().is_some_and(|e| e == "json")
+            && crate::sparkle::delta::is_delta_file(&path.with_extension("")))
 }
 
 /// The conventional delta file name: `<asset>.from-<version>.delta`.
@@ -347,13 +357,16 @@ impl ManifestBuilder {
     }
 
     /// Add every regular file in `dir` (not recursive). Delta files named
-    /// `<asset>.from-<version>.delta` are attached to their asset.
+    /// `<asset>.from-<version>.delta` are attached to their asset. Sparkle
+    /// deltas (`.sparkle.delta`) and their `.json` metadata belong to the
+    /// appcast and are skipped, so a directory shared by both feeds also
+    /// builds with [`Unmatched::Error`].
     pub fn scan_dir(mut self, dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let entries = fs::read_dir(dir).map_err(Error::io("read directory", dir))?;
         for entry in entries {
             let path = entry.map_err(Error::io("read directory", dir))?.path();
-            if !path.is_file() {
+            if !path.is_file() || is_sparkle_delta_or_metadata(&path) {
                 continue;
             }
             if let Some(delta) = DeltaFile::from_path(&path) {

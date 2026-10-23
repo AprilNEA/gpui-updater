@@ -4,6 +4,33 @@ Each section lists the breaking changes of one release and what to change in
 your app. The [API documentation](https://docs.rs/gpui-updater-core) describes
 the current behaviour.
 
+## Migrating gpui-updater-release from 0.4.3
+
+Sparkle never applied a delta that gpui-updater-release 0.4.3 made. Sparkle
+saves a download under the last segment of its URL and applies it as a delta
+only when that name ends in `.delta`. The old `.sparkle-delta` names failed
+with "No valid unarchiver", so every client downloaded the delta and then the
+full update. Updates still installed, but the deltas saved nothing.
+
+Behavior changes:
+
+- `sparkle::delta::delta_file_name` → `<archive>.from-<version>.sparkle.delta`
+  (was `….sparkle-delta`). Change upload globs and filters from
+  `*.sparkle-delta` to `*.sparkle.delta`; the metadata is
+  `*.sparkle.delta.json`.
+- `sparkle::delta::create` refuses an output path that does not end in
+  `.delta`.
+- `Appcast::write` and `DeltaEnclosure::for_file` fail on a delta URL that
+  does not end in `.delta`; `Appcast::render` does not check.
+- `gpui-updater-release appcast` and `sparkle::delta::find_deltas` fail on a
+  `.sparkle-delta` file instead of attaching it. Make such deltas again, or
+  rename each delta and its `.json` to end in `.sparkle.delta`.
+- `ManifestBuilder::scan_dir` skips Sparkle deltas and their metadata, so a
+  directory shared with the appcast also builds with `Unmatched::Error`.
+
+New, with no change needed: `ensure_sparkle_delta_url`, `Appcast::validate`,
+`sparkle::delta::FILE_SUFFIX`, `is_delta_file`, and `find_deltas`.
+
 ## Migrating from 0.3
 
 Breaking changes:
