@@ -245,3 +245,20 @@ fn the_core_source_reads_what_the_builder_writes() {
     assert_eq!(release.deltas[0].from, Version::new(0, 8, 13));
     assert_eq!(release.deltas[0].to, Version::new(0, 8, 14));
 }
+
+#[test]
+fn sparkle_deltas_are_neither_native_deltas_nor_unmatched() {
+    let dir = dist(true);
+    let name = crate::sparkle::delta::delta_file_name("OpenLogi-v0.8.14-macos-arm64.dmg", "0.8.13");
+    assert!(DeltaFile::from_path(&dir.path().join(&name)).is_none());
+    fs::write(dir.path().join(&name), "sparkle").unwrap();
+    fs::write(dir.path().join(format!("{name}.json")), "{}").unwrap();
+    let manifest = base()
+        .unmatched(Unmatched::Error)
+        .scan_dir(dir.path())
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(manifest.assets.iter().all(|a| a.deltas.is_empty()));
+    assert!(manifest.assets.iter().all(|a| !a.name.contains("sparkle")));
+}

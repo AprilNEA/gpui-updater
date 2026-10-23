@@ -262,7 +262,7 @@ struct AppcastArgs {
     /// `sparkle:phasedRolloutInterval` in seconds.
     #[arg(long)]
     phased_rollout_interval: Option<u64>,
-    /// Do not attach `.sparkle-delta` files found in `--dist`.
+    /// Do not attach the `.sparkle.delta` files found in `--dist`.
     #[arg(long)]
     no_deltas: bool,
 }
@@ -497,7 +497,7 @@ struct SparkleDeltaArgs {
     #[arg(long)]
     new: PathBuf,
     /// Delta file, or a directory to write
-    /// `<archive>.from-<version>.sparkle-delta` into.
+    /// `<archive>.from-<version>.sparkle.delta` into.
     #[arg(long)]
     out: PathBuf,
     /// Archive name for the file name when `--out` is a directory;
@@ -808,15 +808,7 @@ fn macos_archives(args: &AppcastArgs) -> Result<Vec<(String, PathBuf)>> {
 }
 
 fn sparkle_deltas(dir: &Path) -> Result<Vec<SparkleDelta>> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|e| e == "sparkle-delta") {
-            out.push(SparkleDelta::read_metadata(&path)?);
-        }
-    }
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+    Ok(sparkle::delta::find_deltas(dir)?)
 }
 
 fn sign(cmd: SignCommand) -> Result {
